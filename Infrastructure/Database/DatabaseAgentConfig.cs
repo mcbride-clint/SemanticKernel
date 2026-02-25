@@ -11,5 +11,6 @@ public sealed record DatabaseAgentConfig(
     string Description,
     string ConnectionString,
     string ContextQuery,
-    int    MaxRows = 500        // guard against flooding the LLM context window
+    int    MaxRows    = 500,    // guard against flooding the LLM context window
+    IReadOnlyList<DbAgentParameter>? Parameters = null
 );
