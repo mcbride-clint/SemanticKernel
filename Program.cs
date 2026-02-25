@@ -2,8 +2,11 @@ using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Configuration;
 using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Infrastructure.Database;
+using BlazorAgentChat.Infrastructure.Rest;
 using BlazorAgentChat.Infrastructure.SemanticKernel;
+using BlazorAgentChat.Infrastructure.SemanticKernel.Plugins;
 using BlazorAgentChat.Services;
+using Microsoft.SemanticKernel;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,34 +17,40 @@ builder.Services
 
 // ── Infrastructure ───────────────────────────────────────────────────────────
 builder.Services.AddSingleton<KernelFactory>();
+builder.Services.AddSingleton<ParameterExtractor>();   // shared by DB + REST runners
+builder.Services.AddHttpClient();                      // IHttpClientFactory for REST runner
 
-// ── Agent Sources (IAgentSource) — add more here to extend the registry ──────
-// Each registered IAgentSource is automatically merged into the agent registry.
-builder.Services.AddSingleton<IAgentSource, AgentLoader>();     // PDF agents (Data/Agents/)
-builder.Services.AddSingleton<IAgentSource, DbAgentLoader>();   // DB agents  (Data/DatabaseAgents/agents.json)
+// ── Kernel Plugins (KernelFunction) — register more here to extend LLM capabilities ──────────
+// Every KernelPlugin registered here is added to every Kernel created by KernelFactory.
+builder.Services.AddSingleton(KernelPluginFactory.CreateFromObject(new DateTimePlugin(), "DateTime"));
 
-// Keep concrete types accessible for runners that depend on them directly
+// ── Agent Sources (IAgentSource) — register more here to extend the registry ─
+// Every IAgentSource is merged into the agent registry automatically.
+builder.Services.AddSingleton<IAgentSource, AgentLoader>();      // PDF   (Data/Agents/)
+builder.Services.AddSingleton<IAgentSource, DbAgentLoader>();    // DB    (Data/DatabaseAgents/agents.json)
+builder.Services.AddSingleton<IAgentSource, RestAgentLoader>();  // REST  (Data/RestAgents/agents.json)
+
+// Keep concrete types resolvable so runners can depend on them directly
 builder.Services.AddSingleton<AgentLoader>();
 builder.Services.AddSingleton<DbAgentLoader>();
+builder.Services.AddSingleton<RestAgentLoader>();
 builder.Services.AddSingleton<PdfTextExtractor>();
 
 // ── Database connectivity ─────────────────────────────────────────────────────
-// NoopDbConnectionFactory throws at runtime if a DB agent is invoked without
-// a real connection factory. Replace with your provider's implementation:
-//
+// Replace NoopDbConnectionFactory with your provider's implementation:
 //   builder.Services.AddSingleton<IDbConnectionFactory, SqlServerConnectionFactory>();
-//
-// See NoopDbConnectionFactory.cs for a complete example.
+// See NoopDbConnectionFactory.cs for a full example.
 builder.Services.AddSingleton<IDbConnectionFactory, NoopDbConnectionFactory>();
 
 // ── Runners ───────────────────────────────────────────────────────────────────
-builder.Services.AddSingleton<SkAgentRunner>();     // PDF runner (concrete, used by CompositeAgentRunner)
-builder.Services.AddSingleton<DbAgentRunner>();     // DB runner  (concrete, used by CompositeAgentRunner)
+builder.Services.AddSingleton<SkAgentRunner>();     // PDF  runner (concrete, used by CompositeAgentRunner)
+builder.Services.AddSingleton<DbAgentRunner>();     // DB   runner (concrete, used by CompositeAgentRunner)
+builder.Services.AddSingleton<RestAgentRunner>();   // REST runner (concrete, used by CompositeAgentRunner)
 builder.Services.AddSingleton<IAgentRunner, CompositeAgentRunner>(); // dispatches by SourceType
 
 // ── Abstractions bound to SK implementations ─────────────────────────────────
-builder.Services.AddSingleton<IAgentRegistry,  SkAgentRegistry>();
-builder.Services.AddSingleton<IAgentRouter,    SkAgentRouter>();
+builder.Services.AddSingleton<IAgentRegistry, SkAgentRegistry>();
+builder.Services.AddSingleton<IAgentRouter,   SkAgentRouter>();
 // Scoped so each Blazor circuit gets its own LastMetadata
 builder.Services.AddScoped<IOrchestrationService, SkOrchestrationService>();
 

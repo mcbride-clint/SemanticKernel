@@ -2,7 +2,9 @@ using System.Diagnostics;
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
 
 namespace BlazorAgentChat.Infrastructure.SemanticKernel;
 
@@ -53,8 +55,11 @@ public sealed class SkAgentRunner : IAgentRunner
         history.AddSystemMessage(systemPrompt);
         history.AddUserMessage(question);
 
+        // Auto function calling lets the LLM invoke registered KernelFunctions (e.g. DateTimePlugin)
+        var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
+
         var sw     = Stopwatch.StartNew();
-        var result = await chatService.GetChatMessageContentAsync(history, cancellationToken: ct);
+        var result = await chatService.GetChatMessageContentAsync(history, settings, kernel, ct);
         sw.Stop();
 
         var content = result.Content ?? string.Empty;

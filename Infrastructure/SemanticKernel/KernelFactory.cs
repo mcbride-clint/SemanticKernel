@@ -9,24 +9,28 @@ namespace BlazorAgentChat.Infrastructure.SemanticKernel;
 
 public sealed class KernelFactory
 {
-    private readonly OpenAiOptions         _opts;
-    private readonly ILoggerFactory        _loggerFactory;
+    private readonly OpenAiOptions          _opts;
+    private readonly ILoggerFactory         _loggerFactory;
     private readonly ILogger<KernelFactory> _log;
+    private readonly IReadOnlyList<KernelPlugin> _plugins;
 
     public KernelFactory(
-        IOptions<OpenAiOptions> opts,
-        ILoggerFactory          loggerFactory)
+        IOptions<OpenAiOptions>   opts,
+        ILoggerFactory            loggerFactory,
+        IEnumerable<KernelPlugin> plugins)
     {
         _opts          = opts.Value;
         _loggerFactory = loggerFactory;
         _log           = loggerFactory.CreateLogger<KernelFactory>();
+        _plugins       = plugins.ToList();
     }
 
     public Kernel Create()
     {
         _log.LogInformation(
-            "Building Kernel. Endpoint={Endpoint} ModelId={ModelId}",
-            _opts.Endpoint, _opts.ModelId);
+            "Building Kernel. Endpoint={Endpoint} ModelId={ModelId} Plugins={Plugins}",
+            _opts.Endpoint, _opts.ModelId,
+            string.Join(", ", _plugins.Select(p => p.Name)));
 
         var httpClient = BuildHttpClient();
         var builder    = Kernel.CreateBuilder();
@@ -40,7 +44,12 @@ public sealed class KernelFactory
             httpClient: httpClient);
 
         var kernel = builder.Build();
-        _log.LogDebug("Kernel built successfully.");
+
+        // Register all plugins so LLM can call their KernelFunctions
+        foreach (var plugin in _plugins)
+            kernel.Plugins.Add(plugin);
+
+        _log.LogDebug("Kernel built successfully. Plugin count={Count}", _plugins.Count);
         return kernel;
     }
 

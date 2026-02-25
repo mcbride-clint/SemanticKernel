@@ -4,7 +4,9 @@ using System.Text.Json;
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
+using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
 
 namespace BlazorAgentChat.Infrastructure.SemanticKernel;
 
@@ -107,11 +109,14 @@ public sealed class SkAgentRouter : IAgentRouter
 
         history.AddUserMessage($"User question: {userQuestion}\n\nAgent responses:\n{context}");
 
+        // Auto function calling lets the LLM invoke registered KernelFunctions during synthesis
+        var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
+
         int chunkCount = 0;
         var sw         = Stopwatch.StartNew();
 
         await foreach (var chunk in chatService.GetStreamingChatMessageContentsAsync(
-                           history, cancellationToken: ct))
+                           history, settings, kernel, ct))
         {
             var text = chunk.Content;
             if (!string.IsNullOrEmpty(text))

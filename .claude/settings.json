@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(dotnet build BlazorAgentChat.csproj)"
+    ],
+    "additionalDirectories": [
+      "d:\\Projects\\SemanticKernel\\Infrastructure\\SemanticKernel"
     ]
   }
 }

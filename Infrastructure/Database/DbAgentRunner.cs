@@ -1,8 +1,6 @@
-using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
 using System.Text;
-using System.Text.Json;
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
@@ -14,16 +12,17 @@ namespace BlazorAgentChat.Infrastructure.Database;
 /// Runs a predefined context query against a database, formats the results,
 /// then sends them to the LLM to answer the user's question.
 ///
-/// If the agent config defines Parameters, a lightweight LLM call first extracts
-/// values from the user's question. Those values are injected as DbParameter objects
-/// (never string-interpolated into SQL — no injection risk).
+/// If the agent config defines Parameters, ParameterExtractor makes a lightweight
+/// LLM call to extract values from the question. Those values are injected as
+/// DbParameter objects — never string-interpolated into SQL.
 /// </summary>
 public sealed class DbAgentRunner : IAgentRunner
 {
-    private readonly DbAgentLoader                    _loader;
-    private readonly IDbConnectionFactory             _connectionFactory;
-    private readonly SemanticKernel.KernelFactory     _kernelFactory;
-    private readonly ILogger<DbAgentRunner>           _log;
+    private readonly DbAgentLoader                _loader;
+    private readonly IDbConnectionFactory         _connectionFactory;
+    private readonly SemanticKernel.KernelFactory _kernelFactory;
+    private readonly ParameterExtractor           _parameterExtractor;
+    private readonly ILogger<DbAgentRunner>       _log;
 
     private const string AnswerSystemPromptTemplate = """
         You are an expert assistant for the database: "{NAME}"
@@ -38,31 +37,18 @@ public sealed class DbAgentRunner : IAgentRunner
         === DATABASE RESULTS END ===
         """;
 
-    private const string ParameterExtractionSystemPrompt = """
-        Extract database query parameters from the user's question.
-        Return ONLY a valid JSON object mapping each parameter name to its extracted string value.
-        Use JSON null for any parameter that the question does not specify.
-        Do not include any explanation — output only the JSON object.
-
-        Parameters to extract:
-        {PARAMETER_DESCRIPTIONS}
-
-        Examples:
-          Question: "Who works in Engineering?"      → {{"Department": "Engineering"}}
-          Question: "List all employees"             → {{"Department": null}}
-          Question: "Show me products under $50"     → {{"MaxPrice": "50", "Category": null}}
-        """;
-
     public DbAgentRunner(
         DbAgentLoader                    loader,
         IDbConnectionFactory             connectionFactory,
         SemanticKernel.KernelFactory     kernelFactory,
+        ParameterExtractor               parameterExtractor,
         ILogger<DbAgentRunner>           log)
     {
-        _loader            = loader;
-        _connectionFactory = connectionFactory;
-        _kernelFactory     = kernelFactory;
-        _log               = log;
+        _loader             = loader;
+        _connectionFactory  = connectionFactory;
+        _kernelFactory      = kernelFactory;
+        _parameterExtractor = parameterExtractor;
+        _log                = log;
     }
 
     public async Task<AgentResponse> RunAsync(
@@ -88,9 +74,9 @@ public sealed class DbAgentRunner : IAgentRunner
 
         if (cfg.Parameters is { Count: > 0 })
         {
-            extractedParams = await ExtractParametersAsync(cfg, question, ct);
+            var specs = cfg.Parameters.Select(p => (p.Name, p.Description, p.Required)).ToList();
+            extractedParams = await _parameterExtractor.ExtractAsync(cfg.Id, specs, question, ct);
 
-            // Fail fast for missing required parameters
             var missing = cfg.Parameters
                 .Where(p => p.Required && string.IsNullOrWhiteSpace(extractedParams.GetValueOrDefault(p.Name)))
                 .Select(p => p.Name)
@@ -157,93 +143,23 @@ public sealed class DbAgentRunner : IAgentRunner
             Elapsed:         sw.Elapsed);
     }
 
-    /// <summary>
-    /// Makes a lightweight LLM call to extract parameter values from the user's question.
-    /// Returns a dictionary of parameter name → extracted string value (null if not found).
-    /// </summary>
-    private async Task<Dictionary<string, string?>> ExtractParametersAsync(
-        DatabaseAgentConfig cfg,
-        string              question,
-        CancellationToken   ct)
-    {
-        var paramDescriptions = string.Join("\n", cfg.Parameters!.Select(p =>
-            $"- {p.Name} ({(p.Required ? "required" : "optional")}): {p.Description}"));
-
-        var systemPrompt = ParameterExtractionSystemPrompt
-            .Replace("{PARAMETER_DESCRIPTIONS}", paramDescriptions);
-
-        _log.LogTrace(
-            "Extracting parameters for DB agent id={Id}. Params: {Params}",
-            cfg.Id, string.Join(", ", cfg.Parameters!.Select(p => p.Name)));
-
-        var kernel      = _kernelFactory.Create();
-        var chatService = kernel.GetRequiredService<IChatCompletionService>();
-        var history     = new ChatHistory();
-        history.AddSystemMessage(systemPrompt);
-        history.AddUserMessage(question);
-
-        var sw     = Stopwatch.StartNew();
-        var result = await chatService.GetChatMessageContentAsync(history, cancellationToken: ct);
-        var raw    = result.Content?.Trim() ?? "{}";
-        sw.Stop();
-
-        _log.LogDebug(
-            "Parameter extraction for id={Id} completed in {Ms}ms. Raw: {Raw}",
-            cfg.Id, sw.ElapsedMilliseconds, raw);
-
-        try
-        {
-            var doc    = JsonDocument.Parse(raw);
-            var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var p in cfg.Parameters!)
-            {
-                if (doc.RootElement.TryGetProperty(p.Name, out var elem))
-                {
-                    values[p.Name] = elem.ValueKind == JsonValueKind.Null
-                        ? null
-                        : elem.GetString();
-                }
-                else
-                {
-                    values[p.Name] = null;
-                }
-            }
-
-            _log.LogInformation(
-                "DB agent id={Id} extracted parameters: {Params}",
-                cfg.Id,
-                string.Join(", ", values.Select(kv => $"{kv.Key}={kv.Value ?? "null"}")));
-
-            return values;
-        }
-        catch (JsonException ex)
-        {
-            _log.LogWarning(ex,
-                "Parameter extraction returned non-JSON for id={Id}. Raw='{Raw}'. Using nulls.", cfg.Id, raw);
-            return cfg.Parameters!.ToDictionary(p => p.Name, _ => (string?)null);
-        }
-    }
-
     private async Task<string> FetchDataAsync(
-        DatabaseAgentConfig          cfg,
-        Dictionary<string, string?>  parameters,
-        CancellationToken            ct)
+        DatabaseAgentConfig         cfg,
+        Dictionary<string, string?> parameters,
+        CancellationToken           ct)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cfg.ConnectionString, ct);
         await using var command    = connection.CreateCommand();
         command.CommandText = cfg.ContextQuery;
 
-        // Add extracted parameters as safe DbParameter objects — never interpolated into SQL
+        // Inject as safe DbParameter objects — never interpolated into SQL
         foreach (var (name, value) in parameters)
         {
-            var param       = command.CreateParameter();
+            var param           = command.CreateParameter();
             param.ParameterName = name;
             param.Value         = value is null ? DBNull.Value : value;
             command.Parameters.Add(param);
-
-            _log.LogDebug(
-                "DB param @{Name} = {Value}", name, value ?? "NULL");
+            _log.LogDebug("DB param @{Name} = {Value}", name, value ?? "NULL");
         }
 
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -252,12 +168,10 @@ public sealed class DbAgentRunner : IAgentRunner
         var columnCount = reader.FieldCount;
         var rowCount    = 0;
 
-        // Header row
         var headers = Enumerable.Range(0, columnCount).Select(reader.GetName);
         sb.AppendLine(string.Join(" | ", headers));
         sb.AppendLine(string.Join("-+-", Enumerable.Repeat("---", columnCount)));
 
-        // Data rows
         while (await reader.ReadAsync(ct) && rowCount < cfg.MaxRows)
         {
             var values = Enumerable.Range(0, columnCount)

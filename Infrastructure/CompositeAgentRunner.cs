@@ -1,6 +1,7 @@
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using BlazorAgentChat.Infrastructure.Database;
+using BlazorAgentChat.Infrastructure.Rest;
 using BlazorAgentChat.Infrastructure.SemanticKernel;
 using Microsoft.Extensions.Logging;
 
@@ -11,23 +12,26 @@ namespace BlazorAgentChat.Infrastructure;
 /// This is the single IAgentRunner registered in DI — the orchestrator never
 /// needs to know which backing source an agent uses.
 ///
-/// To add a new source type (e.g. "api"), implement IAgentRunner and add a
-/// case to the switch expression below.
+/// To add a new source type, implement IAgentRunner, register it in Program.cs,
+/// and add a case to the switch expression below.
 /// </summary>
 public sealed class CompositeAgentRunner : IAgentRunner
 {
-    private readonly SkAgentRunner          _pdfRunner;
-    private readonly DbAgentRunner          _dbRunner;
+    private readonly SkAgentRunner                 _pdfRunner;
+    private readonly DbAgentRunner                 _dbRunner;
+    private readonly RestAgentRunner               _restRunner;
     private readonly ILogger<CompositeAgentRunner> _log;
 
     public CompositeAgentRunner(
         SkAgentRunner                  pdfRunner,
         DbAgentRunner                  dbRunner,
+        RestAgentRunner                restRunner,
         ILogger<CompositeAgentRunner>  log)
     {
-        _pdfRunner = pdfRunner;
-        _dbRunner  = dbRunner;
-        _log       = log;
+        _pdfRunner  = pdfRunner;
+        _dbRunner   = dbRunner;
+        _restRunner = restRunner;
+        _log        = log;
     }
 
     public Task<AgentResponse> RunAsync(
@@ -42,6 +46,7 @@ public sealed class CompositeAgentRunner : IAgentRunner
         return agent.SourceType switch
         {
             "database" => _dbRunner.RunAsync(agent, question, ct),
+            "rest"     => _restRunner.RunAsync(agent, question, ct),
             "pdf"      => _pdfRunner.RunAsync(agent, question, ct),
             _          => _pdfRunner.RunAsync(agent, question, ct)   // safe default
         };

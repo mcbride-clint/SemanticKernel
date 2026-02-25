@@ -1,0 +1,35 @@
+[
+  {
+    "Id":          "blog-posts-api",
+    "Name":        "Blog Posts API",
+    "Description": "Retrieves blog posts from the public JSONPlaceholder API. Use for questions about posts, titles, or content written by a specific user.",
+    "UrlTemplate": "https://jsonplaceholder.typicode.com/posts",
+    "Method":      "GET",
+    "MaxResponseChars": 6000,
+    "Parameters": [
+      {
+        "Name":        "UserId",
+        "Description": "The numeric author ID to filter posts by (1–10). Use null to return posts from all users.",
+        "Required":    false,
+        "Location":    "query",
+        "QueryKey":    "userId"
+      }
+    ]
+  },
+  {
+    "Id":          "user-details-api",
+    "Name":        "User Details API",
+    "Description": "Looks up profile details for a specific user by ID from the JSONPlaceholder API. Includes name, email, address, phone, and company. Use for questions about a specific user.",
+    "UrlTemplate": "https://jsonplaceholder.typicode.com/users/{UserId}",
+    "Method":      "GET",
+    "MaxResponseChars": 4000,
+    "Parameters": [
+      {
+        "Name":        "UserId",
+        "Description": "The numeric user ID to look up (1–10). This is required.",
+        "Required":    true,
+        "Location":    "path"
+      }
+    ]
+  }
+]
