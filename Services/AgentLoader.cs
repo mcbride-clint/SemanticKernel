@@ -1,4 +1,5 @@
 using System.Text.Json;
+using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using BlazorAgentChat.Configuration;
 using Microsoft.Extensions.Logging;
@@ -6,7 +7,7 @@ using Microsoft.Extensions.Options;
 
 namespace BlazorAgentChat.Services;
 
-public sealed class AgentLoader
+public sealed class AgentLoader : IAgentSource
 {
     private readonly AgentChatOptions      _opts;
     private readonly PdfTextExtractor      _extractor;

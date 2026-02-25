@@ -1,0 +1,18 @@
+[
+  {
+    "Id":               "employee-directory",
+    "Name":             "Employee Directory",
+    "Description":      "Contains current employee records: names, job titles, departments, and email addresses. Use for questions about staff, org structure, or team membership.",
+    "ConnectionString": "Server=localhost;Database=HrDb;Trusted_Connection=true;TrustServerCertificate=true;",
+    "ContextQuery":     "SELECT TOP 500 e.FirstName, e.LastName, e.Email, d.Name AS Department, e.JobTitle FROM dbo.Employees e JOIN dbo.Departments d ON e.DepartmentId = d.Id ORDER BY d.Name, e.LastName",
+    "MaxRows":          500
+  },
+  {
+    "Id":               "product-catalog",
+    "Name":             "Product Catalog",
+    "Description":      "Contains the current product inventory: SKUs, names, prices, stock levels, and categories. Use for questions about products, availability, or pricing.",
+    "ConnectionString": "Server=localhost;Database=StoreDb;Trusted_Connection=true;TrustServerCertificate=true;",
+    "ContextQuery":     "SELECT TOP 500 p.Sku, p.Name, p.Price, p.StockQuantity, c.Name AS Category FROM dbo.Products p JOIN dbo.Categories c ON p.CategoryId = c.Id WHERE p.IsActive = 1 ORDER BY c.Name, p.Name",
+    "MaxRows":          500
+  }
+]

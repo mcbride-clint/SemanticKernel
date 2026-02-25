@@ -1,6 +1,5 @@
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
-using BlazorAgentChat.Services;
 using Microsoft.Extensions.Logging;
 
 namespace BlazorAgentChat.Infrastructure.SemanticKernel;
@@ -10,10 +9,15 @@ public sealed class SkAgentRegistry : IAgentRegistry
     private readonly IReadOnlyList<AgentInfo>  _agents;
     private readonly ILogger<SkAgentRegistry>  _log;
 
-    public SkAgentRegistry(AgentLoader loader, ILogger<SkAgentRegistry> log)
+    /// <summary>
+    /// Accepts every registered IAgentSource (PDF, database, etc.) and merges their agents.
+    /// To add a new source type, implement IAgentSource and register it in Program.cs —
+    /// no changes needed here.
+    /// </summary>
+    public SkAgentRegistry(IEnumerable<IAgentSource> sources, ILogger<SkAgentRegistry> log)
     {
         _log    = log;
-        _agents = loader.LoadAll();
+        _agents = sources.SelectMany(s => s.LoadAll()).ToList();
 
         _log.LogInformation(
             "Agent registry initialized with {Count} agent(s): {Names}",
