@@ -1,0 +1,127 @@
+@page "/"
+@using BlazorAgentChat.Abstractions
+@using BlazorAgentChat.Models
+@inject IOrchestrationService Orchestrator
+
+<PageTitle>Agent Chat</PageTitle>
+
+<div class="chat-container">
+
+    <div class="chat-history" @ref="_historyRef">
+        @foreach (var entry in _history)
+        {
+            <div class="chat-entry @entry.Role.ToString().ToLower()">
+                <span class="role-label">@entry.Role</span>
+                <span class="content">@entry.Content</span>
+                @if (entry.AgentInfo is not null)
+                {
+                    <span class="agent-info">@entry.AgentInfo</span>
+                }
+                <span class="timestamp">@entry.Timestamp.ToString("HH:mm:ss")</span>
+            </div>
+        }
+
+        @if (_isThinking)
+        {
+            <div class="chat-entry assistant thinking">
+                <span class="spinner"></span> Thinking...
+            </div>
+        }
+    </div>
+
+    @if (Orchestrator.LastMetadata is { } meta)
+    {
+        <div class="metadata-bar">
+            Agents: @string.Join(", ", meta.SelectedAgentIds) |
+            Elapsed: @meta.TotalElapsed.TotalSeconds.ToString("F1")s |
+            Id: @meta.CorrelationId
+        </div>
+    }
+
+    <div class="chat-input-row">
+        <textarea @bind="_inputText"
+                  @bind:event="oninput"
+                  @onkeydown="HandleKeyDown"
+                  placeholder="Ask a question… (Enter to send, Shift+Enter for new line)"
+                  rows="3"
+                  disabled="@_isThinking" />
+        <button @onclick="SendAsync" disabled="@_isThinking">Send</button>
+    </div>
+
+</div>
+
+@code {
+    private readonly List<ChatEntry> _history = [];
+    private string _inputText = string.Empty;
+    private bool _isThinking;
+    private ElementReference _historyRef;
+    private CancellationTokenSource? _cts;
+
+    private async Task HandleKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey)
+            await SendAsync();
+    }
+
+    private async Task SendAsync()
+    {
+        var question = _inputText.Trim();
+        if (string.IsNullOrEmpty(question) || _isThinking)
+            return;
+
+        _inputText  = string.Empty;
+        _isThinking = true;
+
+        _history.Add(new ChatEntry
+        {
+            Role    = ChatEntry.ChatRole.User,
+            Content = question
+        });
+
+        var assistantEntry = new ChatEntry { Role = ChatEntry.ChatRole.Assistant };
+        _history.Add(assistantEntry);
+        StateHasChanged();
+
+        _cts = new CancellationTokenSource();
+
+        try
+        {
+            await foreach (var token in Orchestrator.AskAsync(question, _cts.Token))
+            {
+                assistantEntry.Content += token;
+                StateHasChanged();
+                await Task.Yield();
+            }
+
+            // Annotate with which agents contributed
+            if (Orchestrator.LastMetadata is { } m && m.SelectedAgentIds.Count > 0)
+            {
+                // We can't set init-only AgentInfo here, so track via a wrapper approach.
+                // Replace entry to set the AgentInfo field after streaming completes.
+                var idx = _history.IndexOf(assistantEntry);
+                _history[idx] = new ChatEntry
+                {
+                    Role      = ChatEntry.ChatRole.Assistant,
+                    Content   = assistantEntry.Content,
+                    Timestamp = assistantEntry.Timestamp,
+                    AgentInfo = "Answered by: " + string.Join(", ", m.SelectedAgentIds)
+                };
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            assistantEntry.Content += " [cancelled]";
+        }
+        catch (Exception ex)
+        {
+            assistantEntry.Content = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            _isThinking = false;
+            _cts?.Dispose();
+            _cts = null;
+            StateHasChanged();
+        }
+    }
+}

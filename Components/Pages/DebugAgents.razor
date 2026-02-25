@@ -1,0 +1,91 @@
+@page "/debug"
+@using BlazorAgentChat.Abstractions
+@inject IAgentRegistry Registry
+@inject IOrchestrationService Orchestrator
+
+<PageTitle>Debug Agents</PageTitle>
+
+<h2>Loaded Agents (@Registry.GetAll().Count)</h2>
+
+<table class="debug-table">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Name</th>
+            <th>Source</th>
+            <th>Description</th>
+            <th>Content Size</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var a in Registry.GetAll())
+        {
+            <tr>
+                <td><code>@a.Id</code></td>
+                <td>@a.Name</td>
+                <td>@a.SourceType</td>
+                <td>@a.Description</td>
+                <td>@($"{a.PdfCharCount:N0} chars")</td>
+            </tr>
+        }
+        @if (!Registry.GetAll().Any())
+        {
+            <tr>
+                <td colspan="5"><em>No agents loaded. Check Data/Agents/ directory and logs.</em></td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<h2>LLM Connectivity Test</h2>
+<button @onclick="PingAsync" disabled="@_pinging">@(_pinging ? "Testing…" : "Ping LLM")</button>
+
+@if (_pingResult is not null)
+{
+    <pre class="ping-result">@_pingResult</pre>
+}
+
+@if (Orchestrator.LastMetadata is { } meta)
+{
+    <h3>Last Orchestration</h3>
+    <pre class="ping-result">
+Correlation ID : @meta.CorrelationId
+Selected agents: @string.Join(", ", meta.SelectedAgentIds)
+Total elapsed  : @meta.TotalElapsed.TotalSeconds.ToString("F2")s
+    </pre>
+}
+
+@code {
+    private string? _pingResult;
+    private bool _pinging;
+
+    private async Task PingAsync()
+    {
+        _pinging    = true;
+        _pingResult = "Testing…";
+        StateHasChanged();
+
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            await foreach (var token in Orchestrator.AskAsync("Say hello in one sentence."))
+                sb.Append(token);
+
+            _pingResult = sb.ToString();
+
+            if (Orchestrator.LastMetadata is { } m)
+                _pingResult += $"\n\n[Agents: {string.Join(", ", m.SelectedAgentIds)}, " +
+                               $"Elapsed: {m.TotalElapsed.TotalSeconds:F2}s, " +
+                               $"Id: {m.CorrelationId}]";
+        }
+        catch (Exception ex)
+        {
+            _pingResult = $"ERROR: {ex.Message}";
+        }
+        finally
+        {
+            _pinging = false;
+            StateHasChanged();
+        }
+    }
+}
