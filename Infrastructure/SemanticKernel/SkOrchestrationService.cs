@@ -102,6 +102,27 @@ public sealed class SkOrchestrationService : IOrchestrationService
             string.Join(", ", selectedAgents.Select(x => $"{x.Agent.Name}({x.Selection.Confidence:P0})")));
 
         // ── Step 2: Run agents in parallel with per-agent error isolation ────────
+        //
+        // FUTURE MIGRATION (Microsoft Agent Framework — ConcurrentOrchestration):
+        //
+        //   When all agent types can be represented as KernelAgent subclasses, replace
+        //   the Task.WhenAll block below with ConcurrentOrchestration + InProcessRuntime:
+        //
+        //     var kernelAgents = selectedAgents
+        //         .Select(x => AgentKernelFactory.Create(x.Agent.Name, systemPrompt, kernel))
+        //         .ToList();
+        //     var orchestration = new ConcurrentOrchestration([..kernelAgents]);
+        //     await using var runtime = new InProcessRuntime();
+        //     await runtime.StartAsync(ct);
+        //     var results = await orchestration.InvokeAsync(
+        //         new ChatMessageContent(AuthorRole.User, userQuestion), runtime, ct);
+        //     await runtime.StopAsync(ct);
+        //
+        //   Note: Custom runners (DB, REST, TechnicalDrawing) need KernelAgent wrappers
+        //   before this path is viable. Packages required:
+        //     Microsoft.SemanticKernel.Agents.Orchestration
+        //     Microsoft.SemanticKernel.Agents.Runtime.InProcess
+        //
         var agentTasks = selectedAgents
             .Select(x => RunAgentSafeAsync(x.Agent, x.Selection, userQuestion, attachment, correlationId, ct))
             .ToList();

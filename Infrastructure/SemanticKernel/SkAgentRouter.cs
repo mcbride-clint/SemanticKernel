@@ -6,6 +6,7 @@ using BlazorAgentChat.Abstractions.Models;
 using BlazorAgentChat.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Agents;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.OpenAI;
 
@@ -54,6 +55,11 @@ public sealed class SkAgentRouter : IAgentRouter
         _log           = log;
     }
 
+    // ── SelectAgentsAsync ────────────────────────────────────────────────────────
+    // Kept as a raw IChatCompletionService call: the routing LLM call must return
+    // clean JSON and must NOT invoke any KernelFunction tools. Wrapping it in a
+    // ChatCompletionAgent would add unnecessary overhead and risk tool calls
+    // corrupting the JSON output.
     public async Task<IReadOnlyList<AgentSelection>> SelectAgentsAsync(
         string                   userQuestion,
         IReadOnlyList<AgentInfo> available,
@@ -135,6 +141,11 @@ public sealed class SkAgentRouter : IAgentRouter
         }
     }
 
+    // ── SynthesizeAsync ──────────────────────────────────────────────────────────
+    // Uses ChatCompletionAgent.InvokeStreamingAsync so the Agent Framework manages
+    // the chat turn, execution settings, and KernelFunction dispatch.
+    // Prior conversation turns are passed as messages so the LLM has multi-turn context
+    // without requiring a persistent AgentThread across Blazor circuit lifetime.
     public async IAsyncEnumerable<string> SynthesizeAsync(
         string                           userQuestion,
         IReadOnlyList<AgentResponse>     agentResponses,
@@ -146,40 +157,19 @@ public sealed class SkAgentRouter : IAgentRouter
             "Synthesizing from {Count} agent response(s). HistoryTurns={Turns}, HasAttachment={Has}.",
             agentResponses.Count, history?.Count ?? 0, attachment is not null);
 
-        var kernel      = _kernelFactory.Create();
-        var chatService = kernel.GetRequiredService<IChatCompletionService>();
-        var chatHistory = new ChatHistory();
-        chatHistory.AddSystemMessage(SynthesisSystemPrompt);
+        var kernel     = _kernelFactory.Create();
+        var chatAgent  = AgentKernelFactory.Create("Synthesizer", SynthesisSystemPrompt, kernel, enableFunctions: true);
 
-        // Prepend prior conversation turns for multi-turn context
-        if (history is { Count: > 0 })
-        {
-            foreach (var turn in history)
-            {
-                if (turn.Role == "user") chatHistory.AddUserMessage(turn.Content);
-                else                     chatHistory.AddAssistantMessage(turn.Content);
-            }
-        }
+        // Build the ordered message list: prior turns first, then the current synthesis request.
+        // Passing them all as the 'messages' argument means the agent adds them to a fresh thread
+        // in order, giving the LLM full multi-turn context in a single InvokeStreamingAsync call.
+        var messages = BuildMessages(userQuestion, agentResponses, history, attachment);
 
-        var context = string.Join("\n\n", agentResponses.Select(r =>
-            $"--- {r.Agent.Name} ---\n{r.Content}"));
-
-        _log.LogTrace("Synthesis context:\n{Context}", context);
-
-        // Build the user message, appending attachment context if present
-        var attachmentNote = attachment is not null
-            ? $"\n\n[User attached: {attachment.FileName}]\n{attachment.Summary}"
-            : string.Empty;
-
-        chatHistory.AddUserMessage(
-            $"User question: {userQuestion}{attachmentNote}\n\nAgent responses:\n{context}");
-
-        var settings   = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
         int chunkCount = 0;
         var sw         = Stopwatch.StartNew();
 
-        await foreach (var chunk in chatService.GetStreamingChatMessageContentsAsync(
-                           chatHistory, settings, kernel, ct))
+        await foreach (var chunk in chatAgent.InvokeStreamingAsync(
+                           messages, thread: null, options: null, ct))
         {
             var text = chunk.Content;
             if (!string.IsNullOrEmpty(text))
@@ -192,6 +182,41 @@ public sealed class SkAgentRouter : IAgentRouter
         _log.LogInformation(
             "Synthesis complete. StreamedChunks={Chunks}, Elapsed={Ms}ms",
             chunkCount, sw.ElapsedMilliseconds);
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────────
+
+    private static IReadOnlyList<ChatMessageContent> BuildMessages(
+        string                           userQuestion,
+        IReadOnlyList<AgentResponse>     agentResponses,
+        IReadOnlyList<ConversationTurn>? history,
+        AttachedDocument?                attachment)
+    {
+        var messages = new List<ChatMessageContent>();
+
+        // Prepend prior conversation turns for multi-turn context
+        if (history is { Count: > 0 })
+        {
+            foreach (var turn in history)
+            {
+                messages.Add(turn.Role == "user"
+                    ? new ChatMessageContent(AuthorRole.User,      turn.Content)
+                    : new ChatMessageContent(AuthorRole.Assistant, turn.Content));
+            }
+        }
+
+        var context = string.Join("\n\n", agentResponses.Select(r =>
+            $"--- {r.Agent.Name} ---\n{r.Content}"));
+
+        var attachmentNote = attachment is not null
+            ? $"\n\n[User attached: {attachment.FileName}]\n{attachment.Summary}"
+            : string.Empty;
+
+        messages.Add(new ChatMessageContent(
+            AuthorRole.User,
+            $"User question: {userQuestion}{attachmentNote}\n\nAgent responses:\n{context}"));
+
+        return messages;
     }
 
     private static string BuildAttachmentContext(AttachedDocument? attachment)

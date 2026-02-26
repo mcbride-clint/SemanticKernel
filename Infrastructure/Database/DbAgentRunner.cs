@@ -5,7 +5,8 @@ using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
-using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Agents;
 
 namespace BlazorAgentChat.Infrastructure.Database;
 
@@ -124,29 +125,36 @@ public sealed class DbAgentRunner : IAgentRunner
             .Replace("{DESCRIPTION}", agent.Description)
             .Replace("{DB_DATA}",     dbData);
 
-        var kernel      = _kernelFactory.Create();
-        var chatService = kernel.GetRequiredService<IChatCompletionService>();
-        var history     = new ChatHistory();
-        history.AddSystemMessage(systemPrompt);
-
-        // Include attachment context in the user message when present
+        // Build user message — include attachment context when present
+        var userMessage = question;
         if (attachment is not null)
         {
             var attachNote = attachment.HasText
                 ? $"\n\n[User also attached: {attachment.FileName}]\n" +
                   $"=== ATTACHMENT CONTENT ===\n{attachment.ExtractedText}\n=== END ATTACHMENT ==="
                 : $"\n\n[User also attached: {attachment.FileName}]\n{attachment.Summary}";
-            history.AddUserMessage(question + attachNote);
-        }
-        else
-        {
-            history.AddUserMessage(question);
+            userMessage = question + attachNote;
         }
 
-        var result  = await RetryHelper.ExecuteAsync(
-            async ck => await chatService.GetChatMessageContentAsync(history, cancellationToken: ck),
-            _log, $"db-agent:{agent.Id}", maxAttempts: 3, ct);
-        var content = result.Content ?? string.Empty;
+        var kernel    = _kernelFactory.Create();
+        var chatAgent = SemanticKernel.AgentKernelFactory.Create(
+            agent.Name, systemPrompt, kernel, enableFunctions: false);
+
+        // Each retry uses a fresh ChatHistoryAgentThread to avoid dirty state.
+        var content = await RetryHelper.ExecuteAsync(async ck =>
+        {
+            var thread = new ChatHistoryAgentThread();
+            var sb     = new StringBuilder();
+
+            await foreach (var item in chatAgent.InvokeAsync(
+                               [new ChatMessageContent(AuthorRole.User, userMessage)],
+                               thread, options: null, ck))
+            {
+                sb.Append(item.Message.Content);
+            }
+
+            return sb.ToString();
+        }, _log, $"db-agent:{agent.Id}", maxAttempts: 3, ct);
 
         sw.Stop();
         _log.LogDebug(

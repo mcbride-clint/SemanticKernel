@@ -1,11 +1,11 @@
 using System.Diagnostics;
+using System.Text;
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using BlazorAgentChat.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
-using Microsoft.SemanticKernel.ChatCompletion;
-using Microsoft.SemanticKernel.Connectors.OpenAI;
+using Microsoft.SemanticKernel.Agents;
 
 namespace BlazorAgentChat.Infrastructure.SemanticKernel;
 
@@ -48,36 +48,31 @@ public sealed class SkAgentRunner : IAgentRunner
             .Replace("{DESCRIPTION}", agent.Description)
             .Replace("{PDF_TEXT}",    agent.PdfText);
 
-        var kernel      = _kernelFactory.Create();
-        var chatService = kernel.GetRequiredService<IChatCompletionService>();
-        var history     = new ChatHistory();
-        history.AddSystemMessage(systemPrompt);
-
         // Build user message — include attachment as additional context if provided
-        if (attachment is not null)
+        var userMessage = BuildUserMessage(question, attachment);
+
+        var kernel      = _kernelFactory.Create();
+        var chatAgent   = AgentKernelFactory.Create(agent.Name, systemPrompt, kernel, enableFunctions: true);
+
+        var sw      = Stopwatch.StartNew();
+
+        // Each retry gets a fresh ChatHistoryAgentThread so partial state never bleeds across attempts.
+        var content = await RetryHelper.ExecuteAsync(async ck =>
         {
-            var attachNote = attachment.HasText
-                ? $"\n\n[User also attached: {attachment.FileName}]\n" +
-                  $"=== ATTACHMENT CONTENT ===\n{attachment.ExtractedText}\n=== END ATTACHMENT ==="
-                : $"\n\n[User also attached: {attachment.FileName}]\n{attachment.Summary}";
+            var thread = new ChatHistoryAgentThread();
+            var sb     = new StringBuilder();
 
-            history.AddUserMessage(question + attachNote);
-        }
-        else
-        {
-            history.AddUserMessage(question);
-        }
+            await foreach (var item in chatAgent.InvokeAsync(
+                               [new ChatMessageContent(AuthorRole.User, userMessage)],
+                               thread, options: null, ck))
+            {
+                sb.Append(item.Message.Content);
+            }
 
-        // Auto function calling lets the LLM invoke registered KernelFunctions (e.g. DateTimePlugin)
-        var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
+            return sb.ToString();
+        }, _log, $"pdf-agent:{agent.Id}", maxAttempts: 3, ct);
 
-        var sw     = Stopwatch.StartNew();
-        var result = await RetryHelper.ExecuteAsync(
-            async ck => await chatService.GetChatMessageContentAsync(history, settings, kernel, ck),
-            _log, $"pdf-agent:{agent.Id}", maxAttempts: 3, ct);
         sw.Stop();
-
-        var content = result.Content ?? string.Empty;
 
         _log.LogDebug(
             "Agent '{Name}' responded in {Ms}ms. Response length={Len}.",
@@ -88,5 +83,17 @@ public sealed class SkAgentRunner : IAgentRunner
             Content:         content,
             EstimatedTokens: content.Length / 4,
             Elapsed:         sw.Elapsed);
+    }
+
+    private static string BuildUserMessage(string question, AttachedDocument? attachment)
+    {
+        if (attachment is null) return question;
+
+        var attachNote = attachment.HasText
+            ? $"\n\n[User also attached: {attachment.FileName}]\n" +
+              $"=== ATTACHMENT CONTENT ===\n{attachment.ExtractedText}\n=== END ATTACHMENT ==="
+            : $"\n\n[User also attached: {attachment.FileName}]\n{attachment.Summary}";
+
+        return question + attachNote;
     }
 }
