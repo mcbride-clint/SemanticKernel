@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Web;
 using BlazorAgentChat.Abstractions;
+using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -136,7 +137,9 @@ public sealed class RestAgentRunner : IAgentRunner
         history.AddSystemMessage(systemPrompt);
         history.AddUserMessage(question);
 
-        var result  = await chatService.GetChatMessageContentAsync(history, cancellationToken: ct);
+        var result  = await RetryHelper.ExecuteAsync(
+            async ck => await chatService.GetChatMessageContentAsync(history, cancellationToken: ck),
+            _log, $"rest-agent:{agent.Id}", maxAttempts: 3, ct);
         var content = result.Content ?? string.Empty;
 
         sw.Stop();

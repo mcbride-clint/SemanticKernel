@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using BlazorAgentChat.Abstractions;
+using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
@@ -59,7 +60,9 @@ public sealed class SkAgentRunner : IAgentRunner
         var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
 
         var sw     = Stopwatch.StartNew();
-        var result = await chatService.GetChatMessageContentAsync(history, settings, kernel, ct);
+        var result = await RetryHelper.ExecuteAsync(
+            async ck => await chatService.GetChatMessageContentAsync(history, settings, kernel, ck),
+            _log, $"pdf-agent:{agent.Id}", maxAttempts: 3, ct);
         sw.Stop();
 
         var content = result.Content ?? string.Empty;

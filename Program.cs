@@ -5,6 +5,7 @@ using BlazorAgentChat.Infrastructure.Database;
 using BlazorAgentChat.Infrastructure.Rest;
 using BlazorAgentChat.Infrastructure.SemanticKernel;
 using BlazorAgentChat.Infrastructure.SemanticKernel.Plugins;
+using BlazorAgentChat.Infrastructure.Telemetry;
 using BlazorAgentChat.Services;
 using Microsoft.SemanticKernel;
 
@@ -17,8 +18,9 @@ builder.Services
 
 // ── Infrastructure ───────────────────────────────────────────────────────────
 builder.Services.AddSingleton<KernelFactory>();
-builder.Services.AddSingleton<ParameterExtractor>();   // shared by DB + REST runners
-builder.Services.AddHttpClient();                      // IHttpClientFactory for REST runner
+builder.Services.AddSingleton<ParameterExtractor>();     // shared by DB + REST runners
+builder.Services.AddSingleton<AgentChatActivitySource>(); // structured tracing spans
+builder.Services.AddHttpClient();                        // IHttpClientFactory for REST runner
 
 // ── Kernel Plugins (KernelFunction) — register more here to extend LLM capabilities ──────────
 // Every KernelPlugin registered here is added to every Kernel created by KernelFactory.

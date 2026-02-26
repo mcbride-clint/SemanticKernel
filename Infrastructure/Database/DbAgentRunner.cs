@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.Text;
 using BlazorAgentChat.Abstractions;
+using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -128,7 +129,9 @@ public sealed class DbAgentRunner : IAgentRunner
         history.AddSystemMessage(systemPrompt);
         history.AddUserMessage(question);
 
-        var result  = await chatService.GetChatMessageContentAsync(history, cancellationToken: ct);
+        var result  = await RetryHelper.ExecuteAsync(
+            async ck => await chatService.GetChatMessageContentAsync(history, cancellationToken: ck),
+            _log, $"db-agent:{agent.Id}", maxAttempts: 3, ct);
         var content = result.Content ?? string.Empty;
 
         sw.Stop();

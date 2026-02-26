@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using BlazorAgentChat.Abstractions;
+using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
@@ -23,16 +24,25 @@ public sealed class SkAgentRouter : IAgentRouter
         {AGENT_LIST}
 
         The user will ask a question. Your ONLY job is to decide which agents
-        can help answer it. Respond with ONLY a valid JSON array of agent IDs
-        (the "id" field), nothing else. Example: ["tax-guide","security-policy"]
-        If no agent is relevant, respond with an empty array: []
+        can help answer it. Respond with ONLY a valid JSON array of objects.
+        Each object must have:
+          "id"         - the agent ID string (from the list above)
+          "confidence" - a float from 0.0 (not relevant) to 1.0 (highly relevant)
+          "reason"     - a very brief reason (one short phrase, optional)
+
+        Example:
+        [{"id":"tax-guide","confidence":0.95,"reason":"Direct tax question"},{"id":"hr-policy","confidence":0.4,"reason":"May cover benefits"}]
+
+        If no agent is relevant respond with an empty array: []
+        Do NOT include any text outside the JSON array.
         """;
 
     private const string SynthesisSystemPrompt = """
         You are a helpful assistant synthesizing information from multiple expert agents.
         Below are responses from agents who reviewed relevant documents or data.
         Provide a clear, accurate, and concise answer to the user's question
-        based solely on these responses. If the agents did not provide enough
+        based solely on these responses. Use markdown formatting where helpful
+        (headers, bullet points, code blocks). If the agents did not provide enough
         information, say so clearly.
         """;
 
@@ -42,7 +52,7 @@ public sealed class SkAgentRouter : IAgentRouter
         _log           = log;
     }
 
-    public async Task<IReadOnlyList<string>> SelectAgentsAsync(
+    public async Task<IReadOnlyList<AgentSelection>> SelectAgentsAsync(
         string                   userQuestion,
         IReadOnlyList<AgentInfo> available,
         CancellationToken        ct = default)
@@ -64,22 +74,51 @@ public sealed class SkAgentRouter : IAgentRouter
         history.AddSystemMessage(systemPrompt);
         history.AddUserMessage(userQuestion);
 
-        var sw     = Stopwatch.StartNew();
-        var result = await chatService.GetChatMessageContentAsync(history, cancellationToken: ct);
-        var raw    = result.Content?.Trim() ?? "[]";
-        sw.Stop();
-
-        _log.LogDebug(
-            "Routing LLM response in {Ms}ms: {Raw}",
-            sw.ElapsedMilliseconds, raw);
+        var sw  = Stopwatch.StartNew();
+        var raw = "[]";
 
         try
         {
-            var ids = JsonSerializer.Deserialize<List<string>>(raw) ?? [];
+            var result = await RetryHelper.ExecuteAsync(
+                async ck => await chatService.GetChatMessageContentAsync(history, cancellationToken: ck),
+                _log, "routing", maxAttempts: 3, ct);
+            raw = result.Content?.Trim() ?? "[]";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.LogError(ex, "Routing LLM call failed after retries. Returning no agents.");
+            return [];
+        }
+
+        sw.Stop();
+        _log.LogDebug("Routing LLM response in {Ms}ms: {Raw}", sw.ElapsedMilliseconds, raw);
+
+        try
+        {
+            var elements   = JsonSerializer.Deserialize<List<JsonElement>>(raw) ?? [];
+            var selections = new List<AgentSelection>(elements.Count);
+
+            foreach (var elem in elements)
+            {
+                var id = elem.TryGetProperty("id", out var idElem) ? idElem.GetString() : null;
+                if (string.IsNullOrWhiteSpace(id)) continue;
+
+                var confidence = elem.TryGetProperty("confidence", out var confElem)
+                    ? confElem.GetDouble()
+                    : 1.0;
+                var reason = elem.TryGetProperty("reason", out var reasonElem)
+                    ? reasonElem.GetString()
+                    : null;
+
+                selections.Add(new AgentSelection(id, Math.Clamp(confidence, 0.0, 1.0), reason));
+            }
+
             _log.LogInformation(
-                "Router selected {Count} agent(s): {Ids}",
-                ids.Count, string.Join(", ", ids));
-            return ids;
+                "Router selected {Count} agent(s): {Summary}",
+                selections.Count,
+                string.Join(", ", selections.Select(s => $"{s.AgentId}({s.Confidence:P0})")));
+
+            return selections;
         }
         catch (JsonException ex)
         {
@@ -90,33 +129,45 @@ public sealed class SkAgentRouter : IAgentRouter
     }
 
     public async IAsyncEnumerable<string> SynthesizeAsync(
-        string                       userQuestion,
-        IReadOnlyList<AgentResponse> agentResponses,
+        string                           userQuestion,
+        IReadOnlyList<AgentResponse>     agentResponses,
+        IReadOnlyList<ConversationTurn>? history = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _log.LogDebug(
-            "Synthesizing response from {Count} agent response(s).", agentResponses.Count);
+            "Synthesizing response from {Count} agent response(s). History turns={Turns}.",
+            agentResponses.Count, history?.Count ?? 0);
 
         var kernel      = _kernelFactory.Create();
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
-        var history     = new ChatHistory();
-        history.AddSystemMessage(SynthesisSystemPrompt);
+        var chatHistory = new ChatHistory();
+        chatHistory.AddSystemMessage(SynthesisSystemPrompt);
+
+        // Prepend prior conversation turns for multi-turn context
+        if (history is { Count: > 0 })
+        {
+            foreach (var turn in history)
+            {
+                if (turn.Role == "user")
+                    chatHistory.AddUserMessage(turn.Content);
+                else
+                    chatHistory.AddAssistantMessage(turn.Content);
+            }
+        }
 
         var context = string.Join("\n\n", agentResponses.Select(r =>
             $"--- {r.Agent.Name} ---\n{r.Content}"));
 
         _log.LogTrace("Synthesis context:\n{Context}", context);
 
-        history.AddUserMessage($"User question: {userQuestion}\n\nAgent responses:\n{context}");
+        chatHistory.AddUserMessage($"User question: {userQuestion}\n\nAgent responses:\n{context}");
 
-        // Auto function calling lets the LLM invoke registered KernelFunctions during synthesis
-        var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
-
+        var settings   = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
         int chunkCount = 0;
         var sw         = Stopwatch.StartNew();
 
         await foreach (var chunk in chatService.GetStreamingChatMessageContentsAsync(
-                           history, settings, kernel, ct))
+                           chatHistory, settings, kernel, ct))
         {
             var text = chunk.Content;
             if (!string.IsNullOrEmpty(text))

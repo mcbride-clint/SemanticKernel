@@ -16,7 +16,8 @@
 ```
 SemanticKernel/
 ├── Abstractions/              # Interfaces + shared data models
-│   └── Models/                # AgentInfo, AgentResponse, OrchestrationMetadata
+│   └── Models/                # AgentInfo, AgentResponse, AgentSelection,
+│                              # AgentRunResult, ConversationTurn, OrchestrationMetadata
 ├── Components/                # Blazor UI
 │   ├── Layout/                # MainLayout.razor, NavMenu.razor
 │   ├── Pages/                 # Chat.razor (/), DebugAgents.razor (/debug)
@@ -27,10 +28,12 @@ SemanticKernel/
 │   ├── DatabaseAgents/        # agents.json array of DB agent configs
 │   └── RestAgents/            # agents.json array of REST agent configs
 ├── Infrastructure/            # Core business logic
+│   ├── RetryHelper.cs         # Exponential-backoff retry utility (static)
 │   ├── SemanticKernel/        # Kernel, router, registry, runners, plugins
 │   │   └── Plugins/           # KernelFunction classes (DateTimePlugin, etc.)
 │   ├── Database/              # DbAgentRunner, DbAgentLoader, IDbConnectionFactory
-│   └── Rest/                  # RestAgentRunner, RestAgentLoader
+│   ├── Rest/                  # RestAgentRunner, RestAgentLoader
+│   └── Telemetry/             # AgentChatActivitySource (structured tracing)
 ├── Models/                    # UI-facing models (ChatEntry)
 ├── Services/                  # Utilities: PdfTextExtractor, AgentLoader
 ├── Properties/                # launchSettings.json
@@ -84,22 +87,26 @@ Every user question flows through three stages:
 Chat.razor  →  SkOrchestrationService.AskAsync()
                     │
                     ├─ 1. ROUTE  ─  SkAgentRouter.SelectAgentsAsync()
-                    │               (LLM picks agent IDs from available list)
+                    │               (LLM returns weighted JSON: id + confidence + reason)
                     │
-                    ├─ 2. RUN    ─  CompositeAgentRunner.RunAsync() [parallel]
+                    ├─ 2. RUN    ─  CompositeAgentRunner.RunAsync() [parallel, isolated]
                     │               ├─ "pdf"      → SkAgentRunner
                     │               ├─ "database" → DbAgentRunner
                     │               └─ "rest"     → RestAgentRunner
+                    │               Each runner has retry-with-backoff on LLM calls.
+                    │               Per-agent errors are isolated — partial results proceed.
                     │
                     └─ 3. SYNTHESIZE  ─  SkAgentRouter.SynthesizeAsync()
-                                         (streaming final answer to UI)
+                                         (streams answer + injects conversation history)
 ```
 
 **Key design rules:**
 - The routing LLM call has **no tools/plugins** — it must return clean JSON.
 - `SkAgentRunner` and `SynthesizeAsync` both use `FunctionChoiceBehavior.Auto()` so KernelFunctions are available.
-- Agents run **in parallel** in step 2 via `Task.WhenAll`.
+- Agents run **in parallel** in step 2 via `Task.WhenAll`. Failures are caught per-agent; partial results proceed to synthesis.
 - The final answer is **streamed token by token** using `IAsyncEnumerable<string>`.
+- Up to 10 conversation turns are stored per Blazor circuit; history is passed to `SynthesizeAsync` for multi-turn context.
+- `AgentChatActivitySource` emits `Activity` spans for each stage (picked up by OpenTelemetry exporters).
 
 ---
 
@@ -121,9 +128,12 @@ All in `Abstractions/`:
 | Type | Location | Purpose |
 |---|---|---|
 | `AgentInfo` | `Abstractions/Models/` | Immutable record: Id, Name, Description, PdfText, SourceType |
+| `AgentSelection` | `Abstractions/Models/` | Router output: AgentId, Confidence (0–1), optional Reason |
 | `AgentResponse` | `Abstractions/Models/` | Single agent result: Content, EstimatedTokens, Elapsed |
-| `OrchestrationMetadata` | `Abstractions/Models/` | CorrelationId, SelectedAgentIds, TotalElapsed |
-| `ChatEntry` | `Models/` | UI chat message: Role (User/Assistant/System), Content, Timestamp |
+| `AgentRunResult` | `Abstractions/Models/` | Per-agent execution outcome: Success, ErrorMessage, Elapsed, Tokens |
+| `ConversationTurn` | `Abstractions/Models/` | A history turn: Role ("user"/"assistant"), Content |
+| `OrchestrationMetadata` | `Abstractions/Models/` | CorrelationId, SelectedAgents (with confidence), TotalElapsed, AgentResults |
+| `ChatEntry` | `Models/` | UI chat message: Id (Guid), Role, Content (mutable), AgentInfo (mutable) |
 | `DatabaseAgentConfig` | `Infrastructure/Database/` | DB agent: ConnectionString, ContextQuery, Parameters |
 | `RestAgentConfig` | `Infrastructure/Rest/` | REST agent: UrlTemplate, Method, Parameters, Headers |
 
@@ -163,6 +173,7 @@ All registrations live in `Program.cs`. Key entries:
 
 // Kernel factory (creates SK Kernel with all plugins)
 .AddSingleton<KernelFactory>()
+.AddSingleton<AgentChatActivitySource>()   // structured tracing spans
 
 // Plugins (KernelFunction singletons)
 .AddSingleton(KernelPluginFactory.CreateFromObject(new DateTimePlugin(), "DateTime"))
@@ -323,22 +334,29 @@ builder.Services.AddSingleton(
 
 | Component | Route | Purpose |
 |---|---|---|
-| `Chat.razor` | `/` | Main streaming chat UI |
-| `DebugAgents.razor` | `/debug` | Lists all loaded agents; LLM ping test |
+| `Chat.razor` | `/` | Main streaming chat UI with agent selection panel |
+| `DebugAgents.razor` | `/debug` | Lists all agents; per-agent timing & token counts; LLM ping |
 | `MainLayout.razor` | — | Flex layout with sidebar |
 | `NavMenu.razor` | — | Links to Chat and Debug pages |
 
+**Chat.razor features:**
+- **Agent selection panel** — collapsible panel showing all agents grouped by type with checkboxes. Only enabled agents are passed to `AskAsync`.
+- **Markdown rendering** — assistant messages rendered via `Markdig.Markdown.ToHtml` into `MarkupString`.
+- **Copy to clipboard** — per-message copy button using `IJSRuntime`; shows "✓ Copied" for 2 seconds.
+- **Agent disclosure** — inline badge after each assistant message: `"Consulted: Tax Guide (95%) — Direct tax question"`.
+
 **Chat.razor streaming pattern:**
 ```csharp
-await foreach (var token in Orchestrator.AskAsync(question, _cts.Token))
+var enabledSet = (IReadOnlySet<string>)_enabledIds;
+await foreach (var token in Orchestrator.AskAsync(question, _cts.Token, enabledSet))
 {
     assistantEntry.Content += token;
     StateHasChanged();      // re-render per token
     await Task.Yield();     // yield to Blazor render loop
 }
+// After streaming: set mutable AgentInfo for inline disclosure
+assistantEntry.AgentInfo = "Consulted: " + ...;
 ```
-
-The `IOrchestrationService` is injected as a scoped service — one instance per Blazor circuit (user session).
 
 ---
 
@@ -353,9 +371,36 @@ The `IOrchestrationService` is injected as a scoped service — one instance per
 - Supports custom CA certificate for private OpenAI-compatible endpoints (`OpenAiOptions.CaCertPath`).
 - Uses `AddOpenAIChatCompletion` with the configured endpoint/key/modelId.
 
+### RetryHelper
+
+`Infrastructure/RetryHelper.cs`
+
+Static utility used by all runners and `SkAgentRouter` for transient LLM / HTTP failures:
+- Up to 3 attempts, backoff at 1s / 2s / 4s.
+- Retries on `HttpRequestException`, `TimeoutException`, `TaskCanceledException` (timeouts).
+- Never retries `OperationCanceledException` (user cancellation).
+
+```csharp
+var result = await RetryHelper.ExecuteAsync(
+    async ck => await chatService.GetChatMessageContentAsync(history, settings, kernel, ck),
+    _log, "operation-name", maxAttempts: 3, ct);
+```
+
+### AgentChatActivitySource
+
+`Infrastructure/Telemetry/AgentChatActivitySource.cs`
+
+Singleton that emits `System.Diagnostics.Activity` spans for:
+- `orchestration` (tagged with `correlation_id`)
+- `routing` (tagged with `available_agents`)
+- `agent_run` (tagged with `agent.id`, `agent.name`, `agent.source_type`)
+- `synthesis` (tagged with `agent_response_count`)
+
+These are automatically picked up by any registered OpenTelemetry exporter. Register with `AddSource("BlazorAgentChat")`.
+
 ### ParameterExtractor
 
-`Infrastructure/SemanticKernel/ParameterExtractor.cs`
+`Infrastructure/ParameterExtractor.cs`
 
 - Makes a lightweight LLM call to extract structured parameters from natural language.
 - Returns `Dictionary<string, string?>` — `null` for parameters the user did not specify.
@@ -365,12 +410,23 @@ The `IOrchestrationService` is injected as a scoped service — one instance per
 
 `Infrastructure/SemanticKernel/SkAgentRouter.cs`
 
-- `SelectAgentsAsync` — system prompt lists all available agents; LLM returns JSON array of agent IDs. **No tools enabled** on this call.
-- `SynthesizeAsync` — streams the final answer combining all agent responses; **tools enabled** (`FunctionChoiceBehavior.Auto()`).
+- `SelectAgentsAsync` — returns `IReadOnlyList<AgentSelection>` with confidence scores (0–1) and optional reasons. LLM prompt asks for `[{"id":"...","confidence":0.9,"reason":"..."}]`. Falls back to `[]` on JSON parse failure. Uses `RetryHelper` for transient errors.
+- `SynthesizeAsync` — prepends prior `ConversationTurn` history as alternating user/assistant messages before the current question. Tools enabled (`FunctionChoiceBehavior.Auto()`).
+
+### SkOrchestrationService
+
+`Infrastructure/SemanticKernel/SkOrchestrationService.cs`
+
+Scoped per Blazor circuit. Key behaviours:
+- **Conversation history** — maintains `List<ConversationTurn>` (max 10 turns / 5 exchanges). History is passed to `SynthesizeAsync`; updated after each successful response.
+- **Agent filtering** — optional `enabledAgentIds` parameter filters the agent pool before routing.
+- **Per-agent error isolation** — `RunAgentSafeAsync` wraps each runner call; failures return a failed `AgentRunResult` without aborting other agents. Synthesis proceeds with whatever agents succeeded.
+- **Activity spans** — `AgentChatActivitySource` wraps each pipeline stage.
+- **`LastMetadata`** — exposes `OrchestrationMetadata` with `SelectedAgents` (with confidence), `AgentResults` (per-agent timing/tokens/errors), and `TotalElapsed`.
 
 ### CompositeAgentRunner
 
-`Infrastructure/SemanticKernel/CompositeAgentRunner.cs`
+`Infrastructure/CompositeAgentRunner.cs`
 
 Dispatches by `AgentInfo.SourceType`:
 - `"pdf"` → `SkAgentRunner`
@@ -378,25 +434,9 @@ Dispatches by `AgentInfo.SourceType`:
 - `"rest"` → `RestAgentRunner`
 - default → `SkAgentRunner`
 
-### DbAgentRunner
+### DbAgentRunner / RestAgentRunner
 
-`Infrastructure/Database/DbAgentRunner.cs`
-
-1. Extract parameters with `ParameterExtractor`.
-2. Validate required parameters (throws if missing).
-3. Execute parameterized SQL via `IDbConnectionFactory`.
-4. Cap rows at `MaxRows` (default 500) and warn if truncated.
-5. Send result table to LLM for natural-language interpretation.
-
-### RestAgentRunner
-
-`Infrastructure/Rest/RestAgentRunner.cs`
-
-1. Extract parameters with `ParameterExtractor`.
-2. Substitute path params into `UrlTemplate`; append query params.
-3. Send HTTP request with static headers and configurable timeout.
-4. Truncate response body at `MaxResponseChars` (default 8000).
-5. Send body to LLM for interpretation.
+Both wrap their final LLM interpretation call in `RetryHelper.ExecuteAsync` for transient failure resilience.
 
 ---
 
@@ -405,7 +445,7 @@ Dispatches by `AgentInfo.SourceType`:
 - **Namespaces:** Match directory structure under `BlazorAgentChat.*`
 - **Interfaces:** `I` prefix — `IAgentRunner`, `IAgentRouter`, etc.
 - **Implementations:** Named after what they implement minus the `I` — `SkAgentRunner`, `SkAgentRouter`; or descriptive — `CompositeAgentRunner`, `NoopDbConnectionFactory`
-- **Records:** Immutable data containers use `sealed record` — `AgentInfo`, `AgentResponse`, `DatabaseAgentConfig`
+- **Records:** Immutable data containers use `sealed record` — `AgentInfo`, `AgentResponse`, `AgentSelection`, `ConversationTurn`
 - **Options classes:** Suffix `Options` — `OpenAiOptions`, `AgentChatOptions`; use `const string SectionName` for config key
 - **KernelFunction names:** `snake_case` (e.g., `get_current_date`)
 - **Agent IDs:** `kebab-case` derived from folder/config names
@@ -419,6 +459,7 @@ Dispatches by `AgentInfo.SourceType`:
 - **API secrets:** Do not commit real API keys or tokens in JSON files. Use environment variables, .NET Secret Manager, or Azure Key Vault in production.
 - **Context limits:** `MaxRows` (DB) and `MaxResponseChars` (REST) prevent LLM context overflow — always set these on new agent configs.
 - **Parameter extraction:** LLM extracts parameters from user questions; actual DB/HTTP calls use only the extracted structured values, not raw user input.
+- **Markdown rendering:** `MarkupString` bypasses Blazor HTML encoding. Content comes from the LLM (trusted), not from raw user input. For public-facing deployments add HTML sanitization before rendering.
 
 ---
 
@@ -427,7 +468,7 @@ Dispatches by `AgentInfo.SourceType`:
 - All infrastructure classes accept `ILogger<T>` via constructor injection.
 - Use `LogInformation` for normal operation milestones (agent loaded, query executed).
 - Use `LogDebug` for detailed tracing (token counts, elapsed times).
-- Use `LogWarning` for recoverable issues (truncated results, missing optional params).
+- Use `LogWarning` for recoverable issues (truncated results, missing optional params, retry attempts).
 - Use `LogError` for failures with exceptions.
 - Include correlation IDs from `OrchestrationMetadata.CorrelationId` in log messages where available.
 
@@ -459,6 +500,7 @@ Development overrides these to `Trace` / `Debug`.
 
 | Package | Version | Purpose |
 |---|---|---|
+| `Markdig` | `0.*` | Markdown → HTML rendering in Chat.razor |
 | `Microsoft.SemanticKernel` | `1.*` | Core LLM orchestration |
 | `Microsoft.SemanticKernel.Agents.Core` | `1.*` | Agent management |
 | `Microsoft.SemanticKernel.Connectors.OpenAI` | `1.*` | OpenAI API connector |
@@ -491,12 +533,23 @@ Development overrides these to `Trace` / `Debug`.
 2. Replace `NoopDbConnectionFactory` registration in `Program.cs`.
 
 ### Add a New Agent Type (e.g., GraphQL)
-1. Create `IAgentSource` implementation → `RegisterAsGraphQlAgent()` etc.
+1. Create `IAgentSource` implementation → returns `AgentInfo` records with unique `SourceType`.
 2. Create `IAgentRunner` implementation.
 3. Register both in `Program.cs`.
 4. Add dispatch case in `CompositeAgentRunner`.
+
+### Add OpenTelemetry Tracing
+1. Add `OpenTelemetry.Extensions.Hosting` and an exporter (e.g., `OpenTelemetry.Exporter.Jaeger`).
+2. In `Program.cs`:
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(b => b
+        .AddSource(AgentChatActivitySource.SourceName)
+        .AddJaegerExporter());
+```
 
 ### Extend Chat UI
 - All UI lives in `Components/Pages/Chat.razor` and `Components/Layout/`.
 - Styling is in `wwwroot/app.css` — BEM-like class names tied to component roles.
 - `StateHasChanged()` + `Task.Yield()` is the streaming update pattern.
+- Agent selection state (`_enabledIds: HashSet<string>`) lives in `Chat.razor`. Pass it to `AskAsync` as the third parameter.

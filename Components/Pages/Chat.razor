@@ -1,22 +1,86 @@
 @page "/"
 @using BlazorAgentChat.Abstractions
+@using BlazorAgentChat.Abstractions.Models
 @using BlazorAgentChat.Models
+@using Markdig
 @inject IOrchestrationService Orchestrator
+@inject IAgentRegistry Registry
+@inject IJSRuntime JS
 
 <PageTitle>Agent Chat</PageTitle>
 
 <div class="chat-container">
 
+    <!-- ── Agent Selection Panel ──────────────────────────────────── -->
+    <div class="agent-panel-toggle">
+        <button class="agent-toggle-btn" @onclick="ToggleAgentPanel">
+            🤖 Agents (@_enabledIds.Count/@_allAgents.Count enabled)
+            <span class="toggle-arrow">@(_showAgentPanel ? "▲" : "▼")</span>
+        </button>
+    </div>
+
+    @if (_showAgentPanel)
+    {
+        <div class="agent-panel">
+            <div class="agent-panel-header">
+                <span>Select which agents can answer your questions</span>
+                <span class="agent-panel-actions">
+                    <button class="small-btn" @onclick="EnableAll">All</button>
+                    <button class="small-btn" @onclick="DisableAll">None</button>
+                </span>
+            </div>
+            @foreach (var group in _allAgents.GroupBy(a => a.SourceType))
+            {
+                <div class="agent-group">
+                    <div class="agent-group-label">@group.Key.ToUpperInvariant()</div>
+                    @foreach (var agent in group)
+                    {
+                        <label class="agent-checkbox-row">
+                            <input type="checkbox"
+                                   checked="@_enabledIds.Contains(agent.Id)"
+                                   @onchange="e => ToggleAgent(agent.Id, (bool)e.Value!)" />
+                            <span class="agent-checkbox-name">@agent.Name</span>
+                            <span class="agent-checkbox-desc">@agent.Description</span>
+                        </label>
+                    }
+                </div>
+            }
+            @if (!_allAgents.Any())
+            {
+                <p class="agent-panel-empty">No agents loaded. Check Data/ directory and logs.</p>
+            }
+        </div>
+    }
+
+    <!-- ── Chat History ───────────────────────────────────────────── -->
     <div class="chat-history" @ref="_historyRef">
         @foreach (var entry in _history)
         {
-            <div class="chat-entry @entry.Role.ToString().ToLower()">
+            <div class="chat-entry @entry.Role.ToString().ToLower()" id="entry-@entry.Id">
                 <span class="role-label">@entry.Role</span>
-                <span class="content">@entry.Content</span>
-                @if (entry.AgentInfo is not null)
+
+                @if (entry.Role == ChatEntry.ChatRole.Assistant)
                 {
-                    <span class="agent-info">@entry.AgentInfo</span>
+                    <div class="content markdown-content">
+                        @((MarkupString)Markdown.ToHtml(entry.Content ?? "", _mdPipeline))
+                    </div>
+                    <div class="entry-actions">
+                        @if (entry.AgentInfo is not null)
+                        {
+                            <span class="agent-disclosure">@entry.AgentInfo</span>
+                        }
+                        <button class="copy-btn"
+                                title="Copy to clipboard"
+                                @onclick="() => CopyToClipboardAsync(entry)">
+                            @(_copiedId == entry.Id ? "✓ Copied" : "⎘ Copy")
+                        </button>
+                    </div>
                 }
+                else
+                {
+                    <span class="content">@entry.Content</span>
+                }
+
                 <span class="timestamp">@entry.Timestamp.ToString("HH:mm:ss")</span>
             </div>
         }
@@ -24,20 +88,26 @@
         @if (_isThinking)
         {
             <div class="chat-entry assistant thinking">
-                <span class="spinner"></span> Thinking...
+                <span class="spinner"></span> Thinking…
             </div>
         }
     </div>
 
+    <!-- ── Metadata Bar ───────────────────────────────────────────── -->
     @if (Orchestrator.LastMetadata is { } meta)
     {
         <div class="metadata-bar">
-            Agents: @string.Join(", ", meta.SelectedAgentIds) |
+            @{
+                var agentSummary = string.Join(", ", meta.SelectedAgents
+                    .Select(s => $"{ResolveAgentName(s.AgentId)} ({s.Confidence:P0})"));
+            }
+            Consulted: @agentSummary |
             Elapsed: @meta.TotalElapsed.TotalSeconds.ToString("F1")s |
             Id: @meta.CorrelationId
         </div>
     }
 
+    <!-- ── Input Row ──────────────────────────────────────────────── -->
     <div class="chat-input-row">
         <textarea @bind="_inputText"
                   @bind:event="oninput"
@@ -45,18 +115,75 @@
                   placeholder="Ask a question… (Enter to send, Shift+Enter for new line)"
                   rows="3"
                   disabled="@_isThinking" />
-        <button @onclick="SendAsync" disabled="@_isThinking">Send</button>
+        <button @onclick="SendAsync" disabled="@(_isThinking || _enabledIds.Count == 0)">Send</button>
     </div>
+    @if (_enabledIds.Count == 0)
+    {
+        <p class="no-agents-warning">Enable at least one agent to send a message.</p>
+    }
 
 </div>
 
 @code {
+    // ── Markdown pipeline (built once) ──────────────────────────────
+    private static readonly MarkdownPipeline _mdPipeline =
+        new MarkdownPipelineBuilder().UseAdvancedExtensions().Build();
+
+    // ── Chat state ───────────────────────────────────────────────────
     private readonly List<ChatEntry> _history = [];
-    private string _inputText = string.Empty;
-    private bool _isThinking;
+    private string _inputText  = string.Empty;
+    private bool   _isThinking;
     private ElementReference _historyRef;
     private CancellationTokenSource? _cts;
+    private Guid? _copiedId;
 
+    // ── Agent selection state ────────────────────────────────────────
+    private IReadOnlyList<AgentInfo> _allAgents = [];
+    private HashSet<string>          _enabledIds = [];
+    private bool                     _showAgentPanel;
+
+    protected override void OnInitialized()
+    {
+        _allAgents  = Registry.GetAll();
+        _enabledIds = _allAgents.Select(a => a.Id).ToHashSet();
+    }
+
+    // ── Agent panel helpers ──────────────────────────────────────────
+    private void ToggleAgentPanel() => _showAgentPanel = !_showAgentPanel;
+    private void EnableAll()  => _enabledIds = _allAgents.Select(a => a.Id).ToHashSet();
+    private void DisableAll() => _enabledIds = [];
+
+    private void ToggleAgent(string id, bool enabled)
+    {
+        if (enabled) _enabledIds.Add(id);
+        else         _enabledIds.Remove(id);
+    }
+
+    private string ResolveAgentName(string agentId)
+    {
+        var agent = Registry.FindById(agentId);
+        return agent?.Name ?? agentId;
+    }
+
+    // ── Copy to clipboard ────────────────────────────────────────────
+    private async Task CopyToClipboardAsync(ChatEntry entry)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", entry.Content);
+            _copiedId = entry.Id;
+            StateHasChanged();
+            await Task.Delay(2000);
+            _copiedId = null;
+            StateHasChanged();
+        }
+        catch
+        {
+            // Clipboard API may be unavailable in some browsers/contexts
+        }
+    }
+
+    // ── Send logic ───────────────────────────────────────────────────
     private async Task HandleKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Enter" && !e.ShiftKey)
@@ -66,7 +193,7 @@
     private async Task SendAsync()
     {
         var question = _inputText.Trim();
-        if (string.IsNullOrEmpty(question) || _isThinking)
+        if (string.IsNullOrEmpty(question) || _isThinking || _enabledIds.Count == 0)
             return;
 
         _inputText  = string.Empty;
@@ -86,26 +213,22 @@
 
         try
         {
-            await foreach (var token in Orchestrator.AskAsync(question, _cts.Token))
+            // Pass the current enabled-agent filter to the orchestration service
+            var enabledSet = (IReadOnlySet<string>)_enabledIds;
+            await foreach (var token in Orchestrator.AskAsync(question, _cts.Token, enabledSet))
             {
                 assistantEntry.Content += token;
                 StateHasChanged();
                 await Task.Yield();
             }
 
-            // Annotate with which agents contributed
-            if (Orchestrator.LastMetadata is { } m && m.SelectedAgentIds.Count > 0)
+            // Set agent disclosure inline — AgentInfo is now mutable (set accessor)
+            if (Orchestrator.LastMetadata is { } m && m.SelectedAgents.Count > 0)
             {
-                // We can't set init-only AgentInfo here, so track via a wrapper approach.
-                // Replace entry to set the AgentInfo field after streaming completes.
-                var idx = _history.IndexOf(assistantEntry);
-                _history[idx] = new ChatEntry
-                {
-                    Role      = ChatEntry.ChatRole.Assistant,
-                    Content   = assistantEntry.Content,
-                    Timestamp = assistantEntry.Timestamp,
-                    AgentInfo = "Answered by: " + string.Join(", ", m.SelectedAgentIds)
-                };
+                assistantEntry.AgentInfo = "Consulted: " + string.Join(", ",
+                    m.SelectedAgents.Select(s =>
+                        $"{ResolveAgentName(s.AgentId)} ({s.Confidence:P0})" +
+                        (s.Reason is not null ? $" — {s.Reason}" : "")));
             }
         }
         catch (OperationCanceledException)

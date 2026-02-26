@@ -1,5 +1,6 @@
 @page "/debug"
 @using BlazorAgentChat.Abstractions
+@using BlazorAgentChat.Abstractions.Models
 @inject IAgentRegistry Registry
 @inject IOrchestrationService Orchestrator
 
@@ -23,7 +24,7 @@
             <tr>
                 <td><code>@a.Id</code></td>
                 <td>@a.Name</td>
-                <td>@a.SourceType</td>
+                <td><span class="source-badge source-@a.SourceType">@a.SourceType</span></td>
                 <td>@a.Description</td>
                 <td>@($"{a.PdfCharCount:N0} chars")</td>
             </tr>
@@ -31,7 +32,7 @@
         @if (!Registry.GetAll().Any())
         {
             <tr>
-                <td colspan="5"><em>No agents loaded. Check Data/Agents/ directory and logs.</em></td>
+                <td colspan="5"><em>No agents loaded. Check Data/ directory and logs.</em></td>
             </tr>
         }
     </tbody>
@@ -50,9 +51,64 @@
     <h3>Last Orchestration</h3>
     <pre class="ping-result">
 Correlation ID : @meta.CorrelationId
-Selected agents: @string.Join(", ", meta.SelectedAgentIds)
 Total elapsed  : @meta.TotalElapsed.TotalSeconds.ToString("F2")s
     </pre>
+
+    <h3>Agent Routing — Selected Agents</h3>
+    <table class="debug-table">
+        <thead>
+            <tr>
+                <th>Agent</th>
+                <th>Confidence</th>
+                <th>Router Reason</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var sel in meta.SelectedAgents)
+            {
+                var info = Registry.FindById(sel.AgentId);
+                <tr>
+                    <td>@(info?.Name ?? sel.AgentId)</td>
+                    <td>
+                        <div class="confidence-bar-wrap">
+                            <div class="confidence-bar" style="width:@((sel.Confidence * 100).ToString("F0"))%"></div>
+                            <span class="confidence-label">@sel.Confidence.ToString("P0")</span>
+                        </div>
+                    </td>
+                    <td>@(sel.Reason ?? "—")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <h3>Agent Execution Results</h3>
+    <table class="debug-table">
+        <thead>
+            <tr>
+                <th>Agent</th>
+                <th>Status</th>
+                <th>Elapsed</th>
+                <th>Est. Tokens</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var r in meta.AgentResults)
+            {
+                <tr class="@(r.Success ? "" : "agent-run-failed")">
+                    <td>@r.AgentName</td>
+                    <td>@(r.Success ? "✓ OK" : "✗ Failed")</td>
+                    <td>@r.Elapsed.TotalMilliseconds.ToString("F0") ms</td>
+                    <td>@(r.EstimatedTokens > 0 ? r.EstimatedTokens.ToString("N0") : "—")</td>
+                    <td><small>@(r.ErrorMessage ?? "")</small></td>
+                </tr>
+            }
+            @if (!meta.AgentResults.Any())
+            {
+                <tr><td colspan="5"><em>No agent results recorded.</em></td></tr>
+            }
+        </tbody>
+    </table>
 }
 
 @code {
