@@ -167,3 +167,265 @@ h3 { margin: 0.75rem 0 0.25rem; font-size: 1rem; }
 
 button { padding: 0.5rem 1rem; border: none; border-radius: 6px; cursor: pointer; background: #2563eb; color: #fff; font-size: 0.9rem; }
 button:disabled { background: #93c5fd; cursor: default; }
+
+/* ── Agent Selection Panel ──────────────────────────────────── */
+.agent-panel-toggle { margin-bottom: 0; }
+
+.agent-toggle-btn {
+    width: 100%;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 0.45rem 0.75rem;
+    font-size: 0.85rem;
+    color: #475569;
+    cursor: pointer;
+    text-align: left;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.agent-toggle-btn:hover { background: #e2e8f0; }
+
+.toggle-arrow { font-size: 0.75rem; }
+
+.agent-panel {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.agent-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8rem;
+    color: #64748b;
+    margin-bottom: 0.25rem;
+}
+
+.agent-panel-actions { display: flex; gap: 0.35rem; }
+
+.small-btn {
+    padding: 0.15rem 0.5rem;
+    font-size: 0.75rem;
+    background: #e2e8f0;
+    color: #334155;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.small-btn:hover { background: #cbd5e1; }
+
+.agent-group { display: flex; flex-direction: column; gap: 0.2rem; }
+
+.agent-group-label {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+    text-transform: uppercase;
+    padding: 0.15rem 0;
+}
+
+.agent-checkbox-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+    padding: 0.2rem 0.3rem;
+    border-radius: 4px;
+}
+.agent-checkbox-row:hover { background: #e9f0f8; }
+.agent-checkbox-row input[type=checkbox] { flex-shrink: 0; }
+.agent-checkbox-name { font-weight: 600; color: #1e293b; white-space: nowrap; }
+.agent-checkbox-desc { color: #64748b; font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.agent-panel-empty { color: #94a3b8; font-style: italic; font-size: 0.85rem; }
+
+/* ── Markdown Content ───────────────────────────────────────── */
+.markdown-content { line-height: 1.6; }
+.markdown-content p { margin: 0 0 0.5em; }
+.markdown-content p:last-child { margin-bottom: 0; }
+.markdown-content h1, .markdown-content h2, .markdown-content h3 {
+    font-size: 1em; font-weight: 700; margin: 0.5em 0 0.25em;
+}
+.markdown-content ul, .markdown-content ol {
+    margin: 0.25em 0 0.5em 1.25em;
+}
+.markdown-content li { margin-bottom: 0.2em; }
+.markdown-content code {
+    background: #f1f5f9;
+    border-radius: 3px;
+    padding: 0.1em 0.3em;
+    font-size: 0.88em;
+    font-family: ui-monospace, monospace;
+}
+.markdown-content pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: 6px;
+    padding: 0.6rem 0.8rem;
+    overflow-x: auto;
+    margin: 0.4em 0;
+}
+.markdown-content pre code { background: none; padding: 0; color: inherit; }
+.markdown-content blockquote {
+    border-left: 3px solid #93c5fd;
+    padding-left: 0.75rem;
+    margin: 0.5em 0;
+    color: #475569;
+}
+.markdown-content table { border-collapse: collapse; font-size: 0.85em; margin: 0.5em 0; }
+.markdown-content th, .markdown-content td {
+    border: 1px solid #e2e8f0;
+    padding: 0.25em 0.5em;
+}
+.markdown-content th { background: #f1f5f9; font-weight: 600; }
+.markdown-content strong { font-weight: 700; }
+.markdown-content em { font-style: italic; }
+
+/* ── Entry Actions (disclosure + copy) ──────────────────────── */
+.entry-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.35rem;
+    flex-wrap: wrap;
+}
+
+.agent-disclosure {
+    font-size: 0.72rem;
+    color: #64748b;
+    font-style: italic;
+    flex: 1;
+}
+
+.copy-btn {
+    padding: 0.15rem 0.5rem;
+    font-size: 0.72rem;
+    background: transparent;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    color: #64748b;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.1s, color 0.1s;
+    flex-shrink: 0;
+}
+.copy-btn:hover { background: #f1f5f9; color: #1e293b; }
+
+/* ── No-agents Warning ──────────────────────────────────────── */
+.no-agents-warning {
+    font-size: 0.8rem;
+    color: #b45309;
+    text-align: center;
+    margin: 0;
+}
+
+/* ── Debug: Source Badges ────────────────────────────────────── */
+.source-badge {
+    display: inline-block;
+    padding: 0.1em 0.45em;
+    border-radius: 99px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.source-pdf      { background: #dbeafe; color: #1d4ed8; }
+.source-database { background: #dcfce7; color: #15803d; }
+.source-rest     { background: #fef3c7; color: #b45309; }
+
+/* ── Debug: Confidence Bar ───────────────────────────────────── */
+.confidence-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.confidence-bar {
+    height: 8px;
+    background: #2563eb;
+    border-radius: 99px;
+    min-width: 2px;
+    transition: width 0.3s;
+}
+.confidence-label { font-size: 0.8rem; white-space: nowrap; }
+
+/* ── Debug: Failed agent row ─────────────────────────────────── */
+.agent-run-failed td { color: #b91c1c; background: #fef2f2; }
+
+/* ── Source badge: technical drawing ────────────────────────── */
+.source-technical-drawing { background: #f3e8ff; color: #7e22ce; }
+
+/* ── Attachment upload button ────────────────────────────────── */
+.attach-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    transition: background 0.15s;
+    /* Hide the actual file input */
+}
+.attach-btn:hover { background: #e2e8f0; }
+.attach-btn input[type=file] {
+    display: none;
+}
+
+/* ── Attachment preview chip ─────────────────────────────────── */
+.attachment-preview {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    padding: 0.35rem 0.65rem;
+    font-size: 0.82rem;
+    color: #1d4ed8;
+}
+
+.attachment-preview-icon { flex-shrink: 0; }
+
+.attachment-preview-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.attachment-remove-btn {
+    background: transparent;
+    border: none;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.attachment-remove-btn:hover { color: #b91c1c; background: transparent; }
+
+/* ── Attachment badge on user message ────────────────────────── */
+.attachment-badge {
+    display: inline-block;
+    margin-top: 0.25rem;
+    background: rgba(255,255,255,0.2);
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+    font-size: 0.75rem;
+}

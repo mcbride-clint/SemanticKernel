@@ -1,10 +1,13 @@
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Configuration;
 using BlazorAgentChat.Infrastructure;
+using BlazorAgentChat.Infrastructure.Attachments;
 using BlazorAgentChat.Infrastructure.Database;
 using BlazorAgentChat.Infrastructure.Rest;
 using BlazorAgentChat.Infrastructure.SemanticKernel;
 using BlazorAgentChat.Infrastructure.SemanticKernel.Plugins;
+using BlazorAgentChat.Infrastructure.TechnicalDrawing;
+using BlazorAgentChat.Infrastructure.Telemetry;
 using BlazorAgentChat.Services;
 using Microsoft.SemanticKernel;
 
@@ -17,23 +20,30 @@ builder.Services
 
 // ── Infrastructure ───────────────────────────────────────────────────────────
 builder.Services.AddSingleton<KernelFactory>();
-builder.Services.AddSingleton<ParameterExtractor>();   // shared by DB + REST runners
-builder.Services.AddHttpClient();                      // IHttpClientFactory for REST runner
+builder.Services.AddSingleton<ParameterExtractor>();     // shared by DB + REST runners
+builder.Services.AddSingleton<AgentChatActivitySource>(); // structured tracing spans
+builder.Services.AddHttpClient();                        // IHttpClientFactory for REST runner
 
 // ── Kernel Plugins (KernelFunction) — register more here to extend LLM capabilities ──────────
 // Every KernelPlugin registered here is added to every Kernel created by KernelFactory.
 builder.Services.AddSingleton(KernelPluginFactory.CreateFromObject(new DateTimePlugin(), "DateTime"));
 
+// ── Attachment processing ─────────────────────────────────────────────────────
+builder.Services.AddSingleton<DocumentSummaryService>();
+builder.Services.AddSingleton<IAttachmentProcessor, AttachmentProcessor>();
+
 // ── Agent Sources (IAgentSource) — register more here to extend the registry ─
 // Every IAgentSource is merged into the agent registry automatically.
-builder.Services.AddSingleton<IAgentSource, AgentLoader>();      // PDF   (Data/Agents/)
-builder.Services.AddSingleton<IAgentSource, DbAgentLoader>();    // DB    (Data/DatabaseAgents/agents.json)
-builder.Services.AddSingleton<IAgentSource, RestAgentLoader>();  // REST  (Data/RestAgents/agents.json)
+builder.Services.AddSingleton<IAgentSource, AgentLoader>();                    // PDF   (Data/Agents/)
+builder.Services.AddSingleton<IAgentSource, DbAgentLoader>();                  // DB    (Data/DatabaseAgents/agents.json)
+builder.Services.AddSingleton<IAgentSource, RestAgentLoader>();                // REST  (Data/RestAgents/agents.json)
+builder.Services.AddSingleton<IAgentSource, TechnicalDrawingAgentLoader>();    // Drawing (Data/TechnicalDrawingAgents/agents.json)
 
 // Keep concrete types resolvable so runners can depend on them directly
 builder.Services.AddSingleton<AgentLoader>();
 builder.Services.AddSingleton<DbAgentLoader>();
 builder.Services.AddSingleton<RestAgentLoader>();
+builder.Services.AddSingleton<TechnicalDrawingAgentLoader>();
 builder.Services.AddSingleton<PdfTextExtractor>();
 
 // ── Database connectivity ─────────────────────────────────────────────────────
@@ -43,9 +53,10 @@ builder.Services.AddSingleton<PdfTextExtractor>();
 builder.Services.AddSingleton<IDbConnectionFactory, NoopDbConnectionFactory>();
 
 // ── Runners ───────────────────────────────────────────────────────────────────
-builder.Services.AddSingleton<SkAgentRunner>();     // PDF  runner (concrete, used by CompositeAgentRunner)
-builder.Services.AddSingleton<DbAgentRunner>();     // DB   runner (concrete, used by CompositeAgentRunner)
-builder.Services.AddSingleton<RestAgentRunner>();   // REST runner (concrete, used by CompositeAgentRunner)
+builder.Services.AddSingleton<SkAgentRunner>();               // PDF      runner
+builder.Services.AddSingleton<DbAgentRunner>();               // DB       runner
+builder.Services.AddSingleton<RestAgentRunner>();             // REST     runner
+builder.Services.AddSingleton<TechnicalDrawingAgentRunner>(); // Drawing  runner
 builder.Services.AddSingleton<IAgentRunner, CompositeAgentRunner>(); // dispatches by SourceType
 
 // ── Abstractions bound to SK implementations ─────────────────────────────────

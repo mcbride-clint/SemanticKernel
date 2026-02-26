@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.Text;
 using BlazorAgentChat.Abstractions;
+using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -54,6 +55,7 @@ public sealed class DbAgentRunner : IAgentRunner
     public async Task<AgentResponse> RunAsync(
         AgentInfo         agent,
         string            question,
+        AttachedDocument? attachment = null,
         CancellationToken ct = default)
     {
         _log.LogDebug(
@@ -126,9 +128,24 @@ public sealed class DbAgentRunner : IAgentRunner
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
         var history     = new ChatHistory();
         history.AddSystemMessage(systemPrompt);
-        history.AddUserMessage(question);
 
-        var result  = await chatService.GetChatMessageContentAsync(history, cancellationToken: ct);
+        // Include attachment context in the user message when present
+        if (attachment is not null)
+        {
+            var attachNote = attachment.HasText
+                ? $"\n\n[User also attached: {attachment.FileName}]\n" +
+                  $"=== ATTACHMENT CONTENT ===\n{attachment.ExtractedText}\n=== END ATTACHMENT ==="
+                : $"\n\n[User also attached: {attachment.FileName}]\n{attachment.Summary}";
+            history.AddUserMessage(question + attachNote);
+        }
+        else
+        {
+            history.AddUserMessage(question);
+        }
+
+        var result  = await RetryHelper.ExecuteAsync(
+            async ck => await chatService.GetChatMessageContentAsync(history, cancellationToken: ck),
+            _log, $"db-agent:{agent.Id}", maxAttempts: 3, ct);
         var content = result.Content ?? string.Empty;
 
         sw.Stop();
