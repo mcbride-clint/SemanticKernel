@@ -1,10 +1,11 @@
 using System.Diagnostics;
+using System.Text;
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
 using BlazorAgentChat.Infrastructure.SemanticKernel;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
-using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Agents;
 
 namespace BlazorAgentChat.Infrastructure.TechnicalDrawing;
 
@@ -101,15 +102,15 @@ public sealed class TechnicalDrawingAgentRunner : IAgentRunner
             return new AgentResponse(agent, NoAttachmentMessage, 0, TimeSpan.Zero);
         }
 
-        var sw          = Stopwatch.StartNew();
-        var kernel      = _kernelFactory.Create();
-        var chatService = kernel.GetRequiredService<IChatCompletionService>();
-        var history     = new ChatHistory();
-        history.AddSystemMessage(ExtractionSystemPrompt);
+        var sw     = Stopwatch.StartNew();
+        var kernel = _kernelFactory.Create();
+
+        // Build the user message appropriate for the attachment type
+        ChatMessageContent userMessage;
 
         if (attachment.IsImage)
         {
-            // Vision path — pass raw image bytes to the LLM
+            // Vision path — pass raw image bytes to the LLM via a multi-part message
             _log.LogDebug(
                 "Using vision path for image attachment '{File}' ({Bytes:N0} bytes).",
                 attachment.FileName, attachment.SizeBytes);
@@ -119,9 +120,9 @@ public sealed class TechnicalDrawingAgentRunner : IAgentRunner
                 new TextContent(
                     $"Please extract all structured data from this technical document: {attachment.FileName}\n\n" +
                     $"User question: {question}"),
-                new ImageContent(attachment.Bytes, mimeType: attachment.ContentType)
+                new ImageContent(attachment.Bytes, mimeType: attachment.ContentType),
             };
-            history.Add(new ChatMessageContent(AuthorRole.User, items));
+            userMessage = new ChatMessageContent(AuthorRole.User, items);
         }
         else if (attachment.HasText)
         {
@@ -130,7 +131,8 @@ public sealed class TechnicalDrawingAgentRunner : IAgentRunner
                 "Using text path for '{File}' ({Chars} chars).",
                 attachment.FileName, attachment.ExtractedText.Length);
 
-            history.AddUserMessage(
+            userMessage = new ChatMessageContent(
+                AuthorRole.User,
                 $"Document: {attachment.FileName}\n\n" +
                 $"=== DOCUMENT CONTENT ===\n{attachment.ExtractedText}\n=== END DOCUMENT ===\n\n" +
                 $"User question: {question}");
@@ -144,14 +146,27 @@ public sealed class TechnicalDrawingAgentRunner : IAgentRunner
                 0, sw.Elapsed);
         }
 
+        var chatAgent = AgentKernelFactory.Create(
+            agent.Name, ExtractionSystemPrompt, kernel, enableFunctions: false);
+
         try
         {
-            var result = await RetryHelper.ExecuteAsync(
-                async ck => await chatService.GetChatMessageContentAsync(history, cancellationToken: ck),
-                _log, $"tech-drawing:{agent.Id}", maxAttempts: 3, ct);
+            // Each retry uses a fresh ChatHistoryAgentThread to avoid dirty state.
+            var content = await RetryHelper.ExecuteAsync(async ck =>
+            {
+                var thread = new ChatHistoryAgentThread();
+                var sb     = new StringBuilder();
+
+                await foreach (var item in chatAgent.InvokeAsync(
+                                   [userMessage], thread, options: null, ck))
+                {
+                    sb.Append(item.Message.Content);
+                }
+
+                return sb.ToString();
+            }, _log, $"tech-drawing:{agent.Id}", maxAttempts: 3, ct);
 
             sw.Stop();
-            var content = result.Content ?? string.Empty;
 
             _log.LogInformation(
                 "TechnicalDrawingAgentRunner '{Name}' responded in {Ms}ms. Response length={Len}.",
