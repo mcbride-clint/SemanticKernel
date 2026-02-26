@@ -26,13 +26,16 @@ SemanticKernel/
 ├── Data/                      # Agent definition files (no compiled code)
 │   ├── Agents/                # PDF agents: <FolderName>/agent.json + document.pdf
 │   ├── DatabaseAgents/        # agents.json array of DB agent configs
-│   └── RestAgents/            # agents.json array of REST agent configs
+│   ├── RestAgents/            # agents.json array of REST agent configs
+│   └── TechnicalDrawingAgents/ # agents.json array of drawing agent configs
 ├── Infrastructure/            # Core business logic
 │   ├── RetryHelper.cs         # Exponential-backoff retry utility (static)
 │   ├── SemanticKernel/        # Kernel, router, registry, runners, plugins
 │   │   └── Plugins/           # KernelFunction classes (DateTimePlugin, etc.)
+│   ├── Attachments/           # AttachmentProcessor, DocumentSummaryService
 │   ├── Database/              # DbAgentRunner, DbAgentLoader, IDbConnectionFactory
 │   ├── Rest/                  # RestAgentRunner, RestAgentLoader
+│   ├── TechnicalDrawing/      # TechnicalDrawingAgentRunner, Loader, Config
 │   └── Telemetry/             # AgentChatActivitySource (structured tracing)
 ├── Models/                    # UI-facing models (ChatEntry)
 ├── Services/                  # Utilities: PdfTextExtractor, AgentLoader
@@ -84,20 +87,26 @@ Before running, populate `appsettings.json`:
 Every user question flows through three stages:
 
 ```
-Chat.razor  →  SkOrchestrationService.AskAsync()
+Chat.razor  →  [optional] IAttachmentProcessor.ProcessAsync()   ← new: file upload
+                    │               (extracts text from PDF/text; summarizes via LLM)
                     │
-                    ├─ 1. ROUTE  ─  SkAgentRouter.SelectAgentsAsync()
-                    │               (LLM returns weighted JSON: id + confidence + reason)
-                    │
-                    ├─ 2. RUN    ─  CompositeAgentRunner.RunAsync() [parallel, isolated]
-                    │               ├─ "pdf"      → SkAgentRunner
-                    │               ├─ "database" → DbAgentRunner
-                    │               └─ "rest"     → RestAgentRunner
-                    │               Each runner has retry-with-backoff on LLM calls.
-                    │               Per-agent errors are isolated — partial results proceed.
-                    │
-                    └─ 3. SYNTHESIZE  ─  SkAgentRouter.SynthesizeAsync()
-                                         (streams answer + injects conversation history)
+                    └─ SkOrchestrationService.AskAsync(question, ct, enabledIds, attachment?)
+                            │
+                            ├─ 1. ROUTE  ─  SkAgentRouter.SelectAgentsAsync()
+                            │               (LLM returns weighted JSON: id + confidence + reason)
+                            │               Attachment summary injected into routing prompt.
+                            │
+                            ├─ 2. RUN    ─  CompositeAgentRunner.RunAsync() [parallel, isolated]
+                            │               ├─ "pdf"              → SkAgentRunner
+                            │               ├─ "database"         → DbAgentRunner
+                            │               ├─ "rest"             → RestAgentRunner
+                            │               └─ "technical-drawing"→ TechnicalDrawingAgentRunner
+                            │               Each runner receives attachment; uses vision or text path.
+                            │               Each runner has retry-with-backoff on LLM calls.
+                            │               Per-agent errors are isolated — partial results proceed.
+                            │
+                            └─ 3. SYNTHESIZE  ─  SkAgentRouter.SynthesizeAsync()
+                                                 (streams answer + injects conversation history)
 ```
 
 **Key design rules:**
@@ -107,6 +116,7 @@ Chat.razor  →  SkOrchestrationService.AskAsync()
 - The final answer is **streamed token by token** using `IAsyncEnumerable<string>`.
 - Up to 10 conversation turns are stored per Blazor circuit; history is passed to `SynthesizeAsync` for multi-turn context.
 - `AgentChatActivitySource` emits `Activity` spans for each stage (picked up by OpenTelemetry exporters).
+- Attachment processing (text extraction + LLM summarization) happens **before** `AskAsync` is called, in the Blazor component. The processed `AttachedDocument` is passed through the full pipeline.
 
 ---
 
@@ -119,8 +129,9 @@ All in `Abstractions/`:
 | `IOrchestrationService` | Full pipeline: route → run → synthesize. Scoped per Blazor circuit. |
 | `IAgentRouter` | LLM-based agent selector + response synthesizer. |
 | `IAgentRegistry` | Thread-safe lookup of all loaded agents. |
-| `IAgentSource` | Loads one category of agents (PDF, DB, REST). |
-| `IAgentRunner` | Executes a single agent given a question. |
+| `IAgentSource` | Loads one category of agents (PDF, DB, REST, drawing, etc.). |
+| `IAgentRunner` | Executes a single agent given a question + optional attachment. |
+| `IAttachmentProcessor` | Processes uploaded files: extracts text, generates LLM summary. |
 | `IDbConnectionFactory` | Abstracts database provider (SQL Server, PostgreSQL, etc.). |
 
 ### Data Models
@@ -133,9 +144,11 @@ All in `Abstractions/`:
 | `AgentRunResult` | `Abstractions/Models/` | Per-agent execution outcome: Success, ErrorMessage, Elapsed, Tokens |
 | `ConversationTurn` | `Abstractions/Models/` | A history turn: Role ("user"/"assistant"), Content |
 | `OrchestrationMetadata` | `Abstractions/Models/` | CorrelationId, SelectedAgents (with confidence), TotalElapsed, AgentResults |
-| `ChatEntry` | `Models/` | UI chat message: Id (Guid), Role, Content (mutable), AgentInfo (mutable) |
+| `AttachedDocument` | `Abstractions/Models/` | User-uploaded file: FileName, ContentType, Bytes, ExtractedText, Summary |
+| `ChatEntry` | `Models/` | UI chat message: Id (Guid), Role, Content (mutable), AgentInfo (mutable), AttachmentName |
 | `DatabaseAgentConfig` | `Infrastructure/Database/` | DB agent: ConnectionString, ContextQuery, Parameters |
 | `RestAgentConfig` | `Infrastructure/Rest/` | REST agent: UrlTemplate, Method, Parameters, Headers |
+| `TechnicalDrawingAgentConfig` | `Infrastructure/TechnicalDrawing/` | Drawing agent: Id, Name, Description, RequiresAttachment |
 
 ---
 
@@ -178,10 +191,15 @@ All registrations live in `Program.cs`. Key entries:
 // Plugins (KernelFunction singletons)
 .AddSingleton(KernelPluginFactory.CreateFromObject(new DateTimePlugin(), "DateTime"))
 
+// Attachment processing
+.AddSingleton<DocumentSummaryService>()
+.AddSingleton<IAttachmentProcessor, AttachmentProcessor>()
+
 // Agent sources (IAgentSource — all are merged by the registry)
-.AddSingleton<IAgentSource, AgentLoader>()      // PDF agents
-.AddSingleton<IAgentSource, DbAgentLoader>()    // DB agents
-.AddSingleton<IAgentSource, RestAgentLoader>()  // REST agents
+.AddSingleton<IAgentSource, AgentLoader>()                    // PDF agents
+.AddSingleton<IAgentSource, DbAgentLoader>()                  // DB agents
+.AddSingleton<IAgentSource, RestAgentLoader>()                // REST agents
+.AddSingleton<IAgentSource, TechnicalDrawingAgentLoader>()    // Drawing agents
 
 // Registry (merges all IAgentSource implementations)
 .AddSingleton<IAgentRegistry, SkAgentRegistry>()
@@ -191,6 +209,7 @@ All registrations live in `Program.cs`. Key entries:
 .AddSingleton<SkAgentRunner>()
 .AddSingleton<DbAgentRunner>()
 .AddSingleton<RestAgentRunner>()
+.AddSingleton<TechnicalDrawingAgentRunner>()
 
 // Database (swap NoopDbConnectionFactory for a real one)
 .AddSingleton<IDbConnectionFactory, NoopDbConnectionFactory>()
@@ -272,6 +291,63 @@ The entire PDF text is embedded in the system prompt at runtime. No code changes
 ```
 
 Parameter `Location`: `"path"` replaces `{Name}` in the URL template; `"query"` appends `?QueryKey=value`.
+
+### Technical Drawing Agents
+
+**Location:** `Data/TechnicalDrawingAgents/agents.json`
+
+```json
+[{
+  "Id":                 "technical-drawing-extractor",
+  "Name":               "Technical Drawing & Spec Extractor",
+  "Description":        "Extracts structured data from technical drawings, engineering specifications...",
+  "RequiresAttachment": true
+}]
+```
+
+These agents require an attached file. `TechnicalDrawingAgentRunner` uses a **vision path** (multimodal `ImageContent` in `ChatMessageContentItemCollection`) when the attachment is an image, and a **text path** when the attachment has extractable text. If no attachment is provided, the runner returns a helpful message asking the user to attach a document.
+
+The system prompt extracts: title block, BOM, dimensions/tolerances, material specs, surface finish, GD&T callouts, and manufacturing notes.
+
+---
+
+## Attachment Pipeline
+
+When a user attaches a file in Chat.razor:
+
+1. **`IAttachmentProcessor.ProcessAsync(fileName, contentType, stream)`**
+   - Reads all bytes from the stream.
+   - For PDFs: calls `PdfTextExtractor.ExtractFromBytes()` to extract text.
+   - For text/csv/md: decodes as UTF-8.
+   - For images: stores raw bytes (no text extraction).
+   - Calls `DocumentSummaryService.SummarizeAsync()` — makes a lightweight LLM call to generate a structured summary (document type, key data, what agents it might be useful for).
+   - Returns an `AttachedDocument` record.
+
+2. **`SkAgentRouter.SelectAgentsAsync()`** — attachment summary is appended to the routing prompt, guiding the LLM to select appropriate agents (e.g., `technical-drawing-extractor` for engineering docs).
+
+3. **All runners** receive the `AttachedDocument?` parameter and include relevant content in their user message to the LLM.
+
+### AttachedDocument Properties
+
+```csharp
+public sealed record AttachedDocument(
+    string FileName,
+    string ContentType,
+    byte[] Bytes,
+    string ExtractedText,
+    string Summary)
+{
+    public bool HasText  => !string.IsNullOrWhiteSpace(ExtractedText);
+    public bool IsImage  => ContentType.StartsWith("image/", ...);
+    public bool IsPdf    => ContentType == "application/pdf" || FileName.EndsWith(".pdf");
+    public long SizeBytes => Bytes.LongLength;
+}
+```
+
+### Supported File Types (Chat.razor `InputFile` accept list)
+- Documents: `.pdf`, `.txt`, `.csv`, `.md`
+- Images: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`
+- Max size: 10 MB
 
 ---
 
@@ -524,6 +600,16 @@ Development overrides these to `Trace` / `Debug`.
 1. Add an entry to `Data/RestAgents/agents.json`.
 2. Define `UrlTemplate`, `Method`, `Parameters`, and optionally `StaticHeaders`.
 
+### Add a Technical Drawing Agent
+1. Add an entry to `Data/TechnicalDrawingAgents/agents.json` with `Id`, `Name`, `Description`, and `RequiresAttachment: true`.
+2. No code changes needed — the agent uses the shared `TechnicalDrawingAgentRunner`.
+3. Customize the system prompt in `TechnicalDrawingAgentRunner` if specialized extraction logic is needed.
+
+### Change Supported Attachment Types
+- Update the `accept` attribute on `InputFile` in `Chat.razor`.
+- Update `AttachmentProcessor.ProcessAsync` to handle the new MIME type (extract text, store bytes, etc.).
+- If the type needs vision support, ensure `AttachedDocument.IsImage` returns `true` for it.
+
 ### Add a KernelFunction Plugin
 1. Create a class in `Infrastructure/SemanticKernel/Plugins/` with `[KernelFunction]` methods.
 2. Register with `KernelPluginFactory.CreateFromObject(...)` in `Program.cs`.
@@ -553,3 +639,4 @@ builder.Services.AddOpenTelemetry()
 - Styling is in `wwwroot/app.css` — BEM-like class names tied to component roles.
 - `StateHasChanged()` + `Task.Yield()` is the streaming update pattern.
 - Agent selection state (`_enabledIds: HashSet<string>`) lives in `Chat.razor`. Pass it to `AskAsync` as the third parameter.
+- Attachment state (`_processedAttachment`, `_pendingAttachmentName`) is managed in `Chat.razor`. `InputFile` triggers `HandleFileSelected` which calls `IAttachmentProcessor` and sets `_processedAttachment`. This is passed to `AskAsync` as the fourth parameter and cleared after send.

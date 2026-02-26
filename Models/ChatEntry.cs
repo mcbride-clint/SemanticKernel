@@ -8,5 +8,6 @@ public sealed class ChatEntry
     public ChatRole Role      { get; init; }
     public string   Content   { get; set; } = string.Empty;   // mutable for streaming append
     public DateTime Timestamp { get; init; } = DateTime.Now;
-    public string?  AgentInfo { get; set; }   // e.g. "Consulted: Tax Guide (95%), Security Policy (60%)"
+    public string?  AgentInfo      { get; set; }   // e.g. "Consulted: Tax Guide (95%), Security Policy (60%)"
+    public string?  AttachmentName { get; init; }  // filename of any attached file for display
 }

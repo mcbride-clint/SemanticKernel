@@ -2,8 +2,8 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using BlazorAgentChat.Abstractions;
-using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
+using BlazorAgentChat.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -22,6 +22,8 @@ public sealed class SkAgentRouter : IAgentRouter
 
         Available agents:
         {AGENT_LIST}
+
+        {ATTACHMENT_CONTEXT}
 
         The user will ask a question. Your ONLY job is to decide which agents
         can help answer it. Respond with ONLY a valid JSON array of objects.
@@ -55,16 +57,21 @@ public sealed class SkAgentRouter : IAgentRouter
     public async Task<IReadOnlyList<AgentSelection>> SelectAgentsAsync(
         string                   userQuestion,
         IReadOnlyList<AgentInfo> available,
-        CancellationToken        ct = default)
+        AttachedDocument?        attachment = null,
+        CancellationToken        ct         = default)
     {
         _log.LogDebug(
-            "Routing question (length={Len}) across {Count} agents.",
-            userQuestion.Length, available.Count);
+            "Routing question (length={Len}) across {Count} agents. HasAttachment={Has}.",
+            userQuestion.Length, available.Count, attachment is not null);
 
         var agentList = string.Join("\n", available.Select(a =>
             $"  id: \"{a.Id}\"  name: \"{a.Name}\"  description: \"{a.Description}\""));
 
-        var systemPrompt = RoutingSystemPrompt.Replace("{AGENT_LIST}", agentList);
+        var attachmentContext = BuildAttachmentContext(attachment);
+
+        var systemPrompt = RoutingSystemPrompt
+            .Replace("{AGENT_LIST}", agentList)
+            .Replace("{ATTACHMENT_CONTEXT}", attachmentContext);
 
         _log.LogTrace("Routing system prompt:\n{Prompt}", systemPrompt);
 
@@ -131,12 +138,13 @@ public sealed class SkAgentRouter : IAgentRouter
     public async IAsyncEnumerable<string> SynthesizeAsync(
         string                           userQuestion,
         IReadOnlyList<AgentResponse>     agentResponses,
-        IReadOnlyList<ConversationTurn>? history = null,
+        IReadOnlyList<ConversationTurn>? history    = null,
+        AttachedDocument?                attachment = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         _log.LogDebug(
-            "Synthesizing response from {Count} agent response(s). History turns={Turns}.",
-            agentResponses.Count, history?.Count ?? 0);
+            "Synthesizing from {Count} agent response(s). HistoryTurns={Turns}, HasAttachment={Has}.",
+            agentResponses.Count, history?.Count ?? 0, attachment is not null);
 
         var kernel      = _kernelFactory.Create();
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
@@ -148,10 +156,8 @@ public sealed class SkAgentRouter : IAgentRouter
         {
             foreach (var turn in history)
             {
-                if (turn.Role == "user")
-                    chatHistory.AddUserMessage(turn.Content);
-                else
-                    chatHistory.AddAssistantMessage(turn.Content);
+                if (turn.Role == "user") chatHistory.AddUserMessage(turn.Content);
+                else                     chatHistory.AddAssistantMessage(turn.Content);
             }
         }
 
@@ -160,7 +166,13 @@ public sealed class SkAgentRouter : IAgentRouter
 
         _log.LogTrace("Synthesis context:\n{Context}", context);
 
-        chatHistory.AddUserMessage($"User question: {userQuestion}\n\nAgent responses:\n{context}");
+        // Build the user message, appending attachment context if present
+        var attachmentNote = attachment is not null
+            ? $"\n\n[User attached: {attachment.FileName}]\n{attachment.Summary}"
+            : string.Empty;
+
+        chatHistory.AddUserMessage(
+            $"User question: {userQuestion}{attachmentNote}\n\nAgent responses:\n{context}");
 
         var settings   = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
         int chunkCount = 0;
@@ -180,5 +192,22 @@ public sealed class SkAgentRouter : IAgentRouter
         _log.LogInformation(
             "Synthesis complete. StreamedChunks={Chunks}, Elapsed={Ms}ms",
             chunkCount, sw.ElapsedMilliseconds);
+    }
+
+    private static string BuildAttachmentContext(AttachedDocument? attachment)
+    {
+        if (attachment is null) return string.Empty;
+
+        return $"""
+
+            The user has attached a document to their message:
+            Filename: {attachment.FileName}  |  Type: {attachment.ContentType}
+
+            {attachment.Summary}
+
+            Factor this attachment into your agent selection. If a "technical-drawing-extractor"
+            or similar agent is available and the attached document appears to be an engineering
+            document, prefer selecting it with high confidence.
+            """;
     }
 }

@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using BlazorAgentChat.Abstractions;
-using BlazorAgentChat.Infrastructure;
 using BlazorAgentChat.Abstractions.Models;
+using BlazorAgentChat.Infrastructure;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -36,25 +36,37 @@ public sealed class SkAgentRunner : IAgentRunner
     public async Task<AgentResponse> RunAsync(
         AgentInfo         agent,
         string            question,
-        CancellationToken ct = default)
+        AttachedDocument? attachment = null,
+        CancellationToken ct         = default)
     {
         _log.LogDebug(
-            "Invoking agent '{Name}' (id={Id}). Question length={Len}, PDF chars={Chars}.",
-            agent.Name, agent.Id, question.Length, agent.PdfCharCount);
+            "Invoking agent '{Name}' (id={Id}). Question length={Len}, PDF chars={Chars}, HasAttachment={Has}.",
+            agent.Name, agent.Id, question.Length, agent.PdfCharCount, attachment is not null);
 
         var systemPrompt = AgentSystemPromptTemplate
             .Replace("{NAME}",        agent.Name)
             .Replace("{DESCRIPTION}", agent.Description)
             .Replace("{PDF_TEXT}",    agent.PdfText);
 
-        _log.LogTrace(
-            "Agent '{Name}' system prompt length={Len}", agent.Name, systemPrompt.Length);
-
         var kernel      = _kernelFactory.Create();
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
         var history     = new ChatHistory();
         history.AddSystemMessage(systemPrompt);
-        history.AddUserMessage(question);
+
+        // Build user message — include attachment as additional context if provided
+        if (attachment is not null)
+        {
+            var attachNote = attachment.HasText
+                ? $"\n\n[User also attached: {attachment.FileName}]\n" +
+                  $"=== ATTACHMENT CONTENT ===\n{attachment.ExtractedText}\n=== END ATTACHMENT ==="
+                : $"\n\n[User also attached: {attachment.FileName}]\n{attachment.Summary}";
+
+            history.AddUserMessage(question + attachNote);
+        }
+        else
+        {
+            history.AddUserMessage(question);
+        }
 
         // Auto function calling lets the LLM invoke registered KernelFunctions (e.g. DateTimePlugin)
         var settings = new OpenAIPromptExecutionSettings { FunctionChoiceBehavior = FunctionChoiceBehavior.Auto() };
@@ -70,8 +82,6 @@ public sealed class SkAgentRunner : IAgentRunner
         _log.LogDebug(
             "Agent '{Name}' responded in {Ms}ms. Response length={Len}.",
             agent.Name, sw.ElapsedMilliseconds, content.Length);
-
-        _log.LogTrace("Agent '{Name}' full response:\n{Response}", agent.Name, content);
 
         return new AgentResponse(
             Agent:           agent,

@@ -360,3 +360,72 @@ button:disabled { background: #93c5fd; cursor: default; }
 
 /* ── Debug: Failed agent row ─────────────────────────────────── */
 .agent-run-failed td { color: #b91c1c; background: #fef2f2; }
+
+/* ── Source badge: technical drawing ────────────────────────── */
+.source-technical-drawing { background: #f3e8ff; color: #7e22ce; }
+
+/* ── Attachment upload button ────────────────────────────────── */
+.attach-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    transition: background 0.15s;
+    /* Hide the actual file input */
+}
+.attach-btn:hover { background: #e2e8f0; }
+.attach-btn input[type=file] {
+    display: none;
+}
+
+/* ── Attachment preview chip ─────────────────────────────────── */
+.attachment-preview {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 6px;
+    padding: 0.35rem 0.65rem;
+    font-size: 0.82rem;
+    color: #1d4ed8;
+}
+
+.attachment-preview-icon { flex-shrink: 0; }
+
+.attachment-preview-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+.attachment-remove-btn {
+    background: transparent;
+    border: none;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.attachment-remove-btn:hover { color: #b91c1c; background: transparent; }
+
+/* ── Attachment badge on user message ────────────────────────── */
+.attachment-badge {
+    display: inline-block;
+    margin-top: 0.25rem;
+    background: rgba(255,255,255,0.2);
+    border-radius: 4px;
+    padding: 0.1em 0.4em;
+    font-size: 0.75rem;
+}

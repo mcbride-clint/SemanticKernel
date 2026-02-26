@@ -5,6 +5,7 @@
 @using Markdig
 @inject IOrchestrationService Orchestrator
 @inject IAgentRegistry Registry
+@inject IAttachmentProcessor AttachmentProcessor
 @inject IJSRuntime JS
 
 <PageTitle>Agent Chat</PageTitle>
@@ -79,6 +80,10 @@
                 else
                 {
                     <span class="content">@entry.Content</span>
+                    @if (entry.AttachmentName is not null)
+                    {
+                        <span class="attachment-badge">📎 @entry.AttachmentName</span>
+                    }
                 }
 
                 <span class="timestamp">@entry.Timestamp.ToString("HH:mm:ss")</span>
@@ -88,7 +93,15 @@
         @if (_isThinking)
         {
             <div class="chat-entry assistant thinking">
-                <span class="spinner"></span> Thinking…
+                <span class="spinner"></span>
+                @if (_isAnalyzingAttachment)
+                {
+                    <span>Analyzing attachment…</span>
+                }
+                else
+                {
+                    <span>Thinking…</span>
+                }
             </div>
         }
     </div>
@@ -107,8 +120,22 @@
         </div>
     }
 
+    <!-- ── Attachment Preview ─────────────────────────────────────── -->
+    @if (_pendingAttachmentName is not null)
+    {
+        <div class="attachment-preview">
+            <span class="attachment-preview-icon">📎</span>
+            <span class="attachment-preview-name">@_pendingAttachmentName</span>
+            <button class="attachment-remove-btn" @onclick="RemoveAttachment" title="Remove attachment">✕</button>
+        </div>
+    }
+
     <!-- ── Input Row ──────────────────────────────────────────────── -->
     <div class="chat-input-row">
+        <label class="attach-btn" title="Attach file (PDF, image, or text)">
+            📎
+            <InputFile OnChange="HandleFileSelected" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.csv,.md" disabled="@_isThinking" />
+        </label>
         <textarea @bind="_inputText"
                   @bind:event="oninput"
                   @onkeydown="HandleKeyDown"
@@ -133,6 +160,7 @@
     private readonly List<ChatEntry> _history = [];
     private string _inputText  = string.Empty;
     private bool   _isThinking;
+    private bool   _isAnalyzingAttachment;
     private ElementReference _historyRef;
     private CancellationTokenSource? _cts;
     private Guid? _copiedId;
@@ -141,6 +169,10 @@
     private IReadOnlyList<AgentInfo> _allAgents = [];
     private HashSet<string>          _enabledIds = [];
     private bool                     _showAgentPanel;
+
+    // ── Attachment state ─────────────────────────────────────────────
+    private AttachedDocument? _processedAttachment;
+    private string?           _pendingAttachmentName;
 
     protected override void OnInitialized()
     {
@@ -163,6 +195,61 @@
     {
         var agent = Registry.FindById(agentId);
         return agent?.Name ?? agentId;
+    }
+
+    // ── File attachment ───────────────────────────────────────────────
+    private async Task HandleFileSelected(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file is null) return;
+
+        const long maxBytes = 10 * 1024 * 1024; // 10 MB limit
+        if (file.Size > maxBytes)
+        {
+            // Show error in chat
+            _history.Add(new ChatEntry
+            {
+                Role    = ChatEntry.ChatRole.Assistant,
+                Content = $"File **{file.Name}** is too large ({file.Size / 1024 / 1024} MB). Maximum size is 10 MB."
+            });
+            StateHasChanged();
+            return;
+        }
+
+        _isThinking            = true;
+        _isAnalyzingAttachment = true;
+        _pendingAttachmentName = file.Name;
+        StateHasChanged();
+
+        try
+        {
+            using var stream = file.OpenReadStream(maxAllowedSize: maxBytes);
+            _processedAttachment = await AttachmentProcessor.ProcessAsync(
+                file.Name, file.ContentType, stream);
+            _pendingAttachmentName = file.Name; // keep preview showing
+        }
+        catch (Exception ex)
+        {
+            _processedAttachment   = null;
+            _pendingAttachmentName = null;
+            _history.Add(new ChatEntry
+            {
+                Role    = ChatEntry.ChatRole.Assistant,
+                Content = $"Failed to process attachment **{file.Name}**: {ex.Message}"
+            });
+        }
+        finally
+        {
+            _isThinking            = false;
+            _isAnalyzingAttachment = false;
+            StateHasChanged();
+        }
+    }
+
+    private void RemoveAttachment()
+    {
+        _processedAttachment   = null;
+        _pendingAttachmentName = null;
     }
 
     // ── Copy to clipboard ────────────────────────────────────────────
@@ -199,10 +286,17 @@
         _inputText  = string.Empty;
         _isThinking = true;
 
+        // Capture and clear attachment before the async operation
+        var attachment             = _processedAttachment;
+        var attachmentName         = _pendingAttachmentName;
+        _processedAttachment       = null;
+        _pendingAttachmentName     = null;
+
         _history.Add(new ChatEntry
         {
-            Role    = ChatEntry.ChatRole.User,
-            Content = question
+            Role           = ChatEntry.ChatRole.User,
+            Content        = question,
+            AttachmentName = attachmentName
         });
 
         var assistantEntry = new ChatEntry { Role = ChatEntry.ChatRole.Assistant };
@@ -213,9 +307,9 @@
 
         try
         {
-            // Pass the current enabled-agent filter to the orchestration service
+            // Pass the current enabled-agent filter and any attachment to the orchestration service
             var enabledSet = (IReadOnlySet<string>)_enabledIds;
-            await foreach (var token in Orchestrator.AskAsync(question, _cts.Token, enabledSet))
+            await foreach (var token in Orchestrator.AskAsync(question, _cts.Token, enabledSet, attachment))
             {
                 assistantEntry.Content += token;
                 StateHasChanged();

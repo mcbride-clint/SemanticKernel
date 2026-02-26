@@ -3,6 +3,7 @@ using BlazorAgentChat.Abstractions.Models;
 using BlazorAgentChat.Infrastructure.Database;
 using BlazorAgentChat.Infrastructure.Rest;
 using BlazorAgentChat.Infrastructure.SemanticKernel;
+using BlazorAgentChat.Infrastructure.TechnicalDrawing;
 using Microsoft.Extensions.Logging;
 
 namespace BlazorAgentChat.Infrastructure;
@@ -20,23 +21,27 @@ public sealed class CompositeAgentRunner : IAgentRunner
     private readonly SkAgentRunner                 _pdfRunner;
     private readonly DbAgentRunner                 _dbRunner;
     private readonly RestAgentRunner               _restRunner;
+    private readonly TechnicalDrawingAgentRunner   _technicalDrawingRunner;
     private readonly ILogger<CompositeAgentRunner> _log;
 
     public CompositeAgentRunner(
         SkAgentRunner                  pdfRunner,
         DbAgentRunner                  dbRunner,
         RestAgentRunner                restRunner,
+        TechnicalDrawingAgentRunner    technicalDrawingRunner,
         ILogger<CompositeAgentRunner>  log)
     {
-        _pdfRunner  = pdfRunner;
-        _dbRunner   = dbRunner;
-        _restRunner = restRunner;
-        _log        = log;
+        _pdfRunner              = pdfRunner;
+        _dbRunner               = dbRunner;
+        _restRunner             = restRunner;
+        _technicalDrawingRunner = technicalDrawingRunner;
+        _log                    = log;
     }
 
     public Task<AgentResponse> RunAsync(
         AgentInfo         agent,
         string            question,
+        AttachedDocument? attachment = null,
         CancellationToken ct = default)
     {
         _log.LogDebug(
@@ -45,10 +50,11 @@ public sealed class CompositeAgentRunner : IAgentRunner
 
         return agent.SourceType switch
         {
-            "database" => _dbRunner.RunAsync(agent, question, ct),
-            "rest"     => _restRunner.RunAsync(agent, question, ct),
-            "pdf"      => _pdfRunner.RunAsync(agent, question, ct),
-            _          => _pdfRunner.RunAsync(agent, question, ct)   // safe default
+            "database"          => _dbRunner.RunAsync(agent, question, attachment, ct),
+            "rest"              => _restRunner.RunAsync(agent, question, attachment, ct),
+            "technical-drawing" => _technicalDrawingRunner.RunAsync(agent, question, attachment, ct),
+            "pdf"               => _pdfRunner.RunAsync(agent, question, attachment, ct),
+            _                   => _pdfRunner.RunAsync(agent, question, attachment, ct)   // safe default
         };
     }
 }

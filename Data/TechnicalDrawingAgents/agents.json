@@ -1,0 +1,8 @@
+[
+  {
+    "Id": "technical-drawing-extractor",
+    "Name": "Technical Drawing & Spec Extractor",
+    "Description": "Extracts structured data from technical drawings, engineering specifications, CAD documents, and datasheets. Select when the user has attached a technical document OR asks about: dimensions, tolerances, part numbers, bill of materials (BOM), material specifications, surface finish, GD&T callouts, assembly notes, product parameters, electrical/mechanical ratings.",
+    "RequiresAttachment": true
+  }
+]

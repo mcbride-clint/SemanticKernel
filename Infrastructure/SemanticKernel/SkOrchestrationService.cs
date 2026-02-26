@@ -39,7 +39,8 @@ public sealed class SkOrchestrationService : IOrchestrationService
     public async IAsyncEnumerable<string> AskAsync(
         string                              userQuestion,
         [EnumeratorCancellation] CancellationToken ct              = default,
-        IReadOnlySet<string>?               enabledAgentIds = null)
+        IReadOnlySet<string>?               enabledAgentIds = null,
+        AttachedDocument?                   attachment      = null)
     {
         var correlationId = Guid.NewGuid().ToString("N")[..8];
         var totalSw       = Stopwatch.StartNew();
@@ -47,15 +48,18 @@ public sealed class SkOrchestrationService : IOrchestrationService
         using var orchestrationActivity = _activitySource.StartOrchestration(correlationId);
 
         _log.LogInformation(
-            "[{CorrId}] New question received. Length={Len}, FilteredAgents={Filter}",
+            "[{CorrId}] New question. Length={Len}, Filter={Filter}, HasAttachment={Has}",
             correlationId, userQuestion.Length,
-            enabledAgentIds is null ? "all" : string.Join(",", enabledAgentIds));
-        _log.LogTrace("[{CorrId}] Question text: {Question}", correlationId, userQuestion);
+            enabledAgentIds is null ? "all" : string.Join(",", enabledAgentIds),
+            attachment is not null);
+
+        if (attachment is not null)
+            _log.LogInformation(
+                "[{CorrId}] Attachment: '{File}' ({Type}, {Bytes:N0} bytes).",
+                correlationId, attachment.FileName, attachment.ContentType, attachment.SizeBytes);
 
         // ── Step 1: Route ────────────────────────────────────────────────────────
         var allAgents = _registry.GetAll();
-
-        // Apply optional agent filter
         var availableAgents = enabledAgentIds is null
             ? allAgents
             : allAgents.Where(a => enabledAgentIds.Contains(a.Id)).ToList();
@@ -65,7 +69,8 @@ public sealed class SkOrchestrationService : IOrchestrationService
         IReadOnlyList<AgentSelection> selections;
         try
         {
-            selections = await _router.SelectAgentsAsync(userQuestion, availableAgents, ct);
+            selections = await _router.SelectAgentsAsync(
+                userQuestion, availableAgents, attachment, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -98,7 +103,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
 
         // ── Step 2: Run agents in parallel with per-agent error isolation ────────
         var agentTasks = selectedAgents
-            .Select(x => RunAgentSafeAsync(x.Agent, x.Selection, userQuestion, correlationId, ct))
+            .Select(x => RunAgentSafeAsync(x.Agent, x.Selection, userQuestion, attachment, correlationId, ct))
             .ToList();
 
         var results = await Task.WhenAll(agentTasks);
@@ -125,7 +130,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
         }
 
         _log.LogDebug(
-            "[{CorrId}] {Count} agent(s) responded successfully. Proceeding to synthesis.",
+            "[{CorrId}] {Count} agent(s) responded. Proceeding to synthesis.",
             correlationId, successfulResponses.Count);
 
         // ── Step 3: Synthesize with streaming ────────────────────────────────────
@@ -133,7 +138,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
 
         var fullResponse = new StringBuilder();
         await foreach (var token in _router.SynthesizeAsync(
-                           userQuestion, successfulResponses, _conversationHistory, ct))
+                           userQuestion, successfulResponses, _conversationHistory, attachment, ct))
         {
             fullResponse.Append(token);
             yield return token;
@@ -141,7 +146,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
 
         synthesisActivity?.SetTag("response_length", fullResponse.Length);
 
-        // Record this exchange in conversation history for next turn
+        // Record exchange in conversation history for next turn
         _conversationHistory.Add(new ConversationTurn("user",      userQuestion));
         _conversationHistory.Add(new ConversationTurn("assistant", fullResponse.ToString()));
         while (_conversationHistory.Count > MaxHistoryTurns)
@@ -149,10 +154,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
 
         totalSw.Stop();
         LastMetadata = new OrchestrationMetadata(
-            correlationId,
-            selections,
-            totalSw.Elapsed,
-            agentRunResults);
+            correlationId, selections, totalSw.Elapsed, agentRunResults);
 
         orchestrationActivity?.SetTag("total_elapsed_ms", totalSw.ElapsedMilliseconds);
 
@@ -165,6 +167,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
         AgentInfo         agent,
         AgentSelection    selection,
         string            question,
+        AttachedDocument? attachment,
         string            correlationId,
         CancellationToken ct)
     {
@@ -172,7 +175,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
         var sw = Stopwatch.StartNew();
         try
         {
-            var response = await _runner.RunAsync(agent, question, ct);
+            var response = await _runner.RunAsync(agent, question, attachment, ct);
             sw.Stop();
             activity?.SetTag("success", true)
                      .SetTag("elapsed_ms", sw.ElapsedMilliseconds)
