@@ -19,5 +19,12 @@ public sealed record RestAgentConfig(
     int     MaxResponseChars    = 8000,    // guard against flooding the LLM context window
     IReadOnlyDictionary<string, string>? StaticHeaders     = null,
     IReadOnlyDictionary<string, string>? StaticQueryParams = null,
-    IReadOnlyList<RestAgentParameter>?   Parameters        = null
+    IReadOnlyList<RestAgentParameter>?   Parameters        = null,
+    /// <summary>
+    /// Optional JSON body template for POST/PUT requests.
+    /// Use {ParamName} placeholders — values are replaced with extracted parameter values.
+    /// Parameters with Location = "body" are substituted here.
+    /// Example: {"query": "{SearchQuery}", "maxResults": 10}
+    /// </summary>
+    string? BodyTemplate = null
 );

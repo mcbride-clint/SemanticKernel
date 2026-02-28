@@ -25,4 +25,27 @@ public interface IOrchestrationService
 
     /// <summary>Expose last-run metadata for debug display.</summary>
     OrchestrationMetadata? LastMetadata { get; }
+
+    /// <summary>
+    /// Clears the conversation history and last metadata for this circuit.
+    /// Call when the user explicitly resets the conversation.
+    /// </summary>
+    void ClearHistory();
+
+    /// <summary>
+    /// Fired with a human-readable stage label as the pipeline progresses
+    /// ("Routing...", "Running 3 agents...", "Synthesizing...").
+    /// Subscribers update the UI spinner text without polling.
+    /// </summary>
+    event Action<string>? OnProgressChanged;
+
+    /// <summary>
+    /// Restores conversation history from a previously saved snapshot.
+    /// Call on circuit reconnect to re-hydrate multi-turn context.
+    /// Replaces any existing history. Silently clamps to MaxHistoryTurns.
+    /// </summary>
+    void RestoreHistory(IReadOnlyList<ConversationTurn> turns);
+
+    /// <summary>Returns the current conversation history (for persistence).</summary>
+    IReadOnlyList<ConversationTurn> GetHistory();
 }
