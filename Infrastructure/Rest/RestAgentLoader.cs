@@ -43,6 +43,45 @@ public sealed class RestAgentLoader : IAgentSource
 
             foreach (var cfg in entries)
             {
+                // Validate required fields before registering the agent.
+                if (string.IsNullOrWhiteSpace(cfg.Id))
+                {
+                    _log.LogError("REST agent config is missing 'Id'. Skipping entry.");
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(cfg.UrlTemplate))
+                {
+                    _log.LogError("REST agent '{Id}' has empty UrlTemplate. Skipping.", cfg.Id);
+                    continue;
+                }
+                if (!Uri.TryCreate(cfg.UrlTemplate.Split('{')[0], UriKind.Absolute, out _))
+                {
+                    _log.LogError(
+                        "REST agent '{Id}' has invalid UrlTemplate '{Url}'. Skipping.",
+                        cfg.Id, cfg.UrlTemplate);
+                    continue;
+                }
+                if (cfg.TimeoutSeconds <= 0)
+                {
+                    _log.LogError(
+                        "REST agent '{Id}' has invalid TimeoutSeconds={T}. Skipping.",
+                        cfg.Id, cfg.TimeoutSeconds);
+                    continue;
+                }
+                // Verify all required path parameters have matching {Name} tokens in the URL.
+                var missingPathParams = (cfg.Parameters ?? [])
+                    .Where(p => p.Required && p.Location == "path" &&
+                                !cfg.UrlTemplate.Contains($"{{{p.Name}}}"))
+                    .Select(p => p.Name)
+                    .ToList();
+                if (missingPathParams.Count > 0)
+                {
+                    _log.LogError(
+                        "REST agent '{Id}' has required path parameter(s) {Params} not found in UrlTemplate. Skipping.",
+                        cfg.Id, string.Join(", ", missingPathParams));
+                    continue;
+                }
+
                 _configs[cfg.Id] = cfg;
 
                 var agent = new AgentInfo(

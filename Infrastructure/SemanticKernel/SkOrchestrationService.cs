@@ -3,8 +3,10 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using BlazorAgentChat.Abstractions;
 using BlazorAgentChat.Abstractions.Models;
+using BlazorAgentChat.Configuration;
 using BlazorAgentChat.Infrastructure.Telemetry;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace BlazorAgentChat.Infrastructure.SemanticKernel;
 
@@ -15,6 +17,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
     private readonly IAgentRunner                    _runner;
     private readonly AgentChatActivitySource         _activitySource;
     private readonly ILogger<SkOrchestrationService> _log;
+    private readonly double                          _confidenceThreshold;
 
     // Scoped per Blazor circuit — stores recent turns for multi-turn context.
     private readonly List<ConversationTurn> _conversationHistory = [];
@@ -22,19 +25,49 @@ public sealed class SkOrchestrationService : IOrchestrationService
 
     public OrchestrationMetadata? LastMetadata { get; private set; }
 
+    /// <inheritdoc/>
+    public event Action<string>? OnProgressChanged;
+
     public SkOrchestrationService(
         IAgentRegistry                   registry,
         IAgentRouter                     router,
         IAgentRunner                     runner,
         AgentChatActivitySource          activitySource,
+        IOptions<AgentChatOptions>       options,
         ILogger<SkOrchestrationService>  log)
     {
-        _registry       = registry;
-        _router         = router;
-        _runner         = runner;
-        _activitySource = activitySource;
-        _log            = log;
+        _registry            = registry;
+        _router              = router;
+        _runner              = runner;
+        _activitySource      = activitySource;
+        _confidenceThreshold = options.Value.ConfidenceThreshold;
+        _log                 = log;
     }
+
+    /// <inheritdoc/>
+    public void ClearHistory()
+    {
+        _conversationHistory.Clear();
+        LastMetadata = null;
+        _log.LogInformation("Conversation history cleared.");
+    }
+
+    /// <inheritdoc/>
+    public void RestoreHistory(IReadOnlyList<ConversationTurn> turns)
+    {
+        _conversationHistory.Clear();
+        // Accept at most MaxHistoryTurns turns (newest wins if over limit).
+        var slice = turns.Count > MaxHistoryTurns
+            ? turns.Skip(turns.Count - MaxHistoryTurns).ToList()
+            : turns;
+        _conversationHistory.AddRange(slice);
+        _log.LogInformation("Restored {Count} conversation turn(s) from storage.", _conversationHistory.Count);
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<ConversationTurn> GetHistory() => _conversationHistory.AsReadOnly();
+
+    private void ReportProgress(string message) => OnProgressChanged?.Invoke(message);
 
     public async IAsyncEnumerable<string> AskAsync(
         string                              userQuestion,
@@ -44,6 +77,8 @@ public sealed class SkOrchestrationService : IOrchestrationService
     {
         var correlationId = Guid.NewGuid().ToString("N")[..8];
         var totalSw       = Stopwatch.StartNew();
+        var routingSw     = new Stopwatch();
+        var synthesisSw   = new Stopwatch();
 
         using var orchestrationActivity = _activitySource.StartOrchestration(correlationId);
 
@@ -59,6 +94,8 @@ public sealed class SkOrchestrationService : IOrchestrationService
                 correlationId, attachment.FileName, attachment.ContentType, attachment.SizeBytes);
 
         // ── Step 1: Route ────────────────────────────────────────────────────────
+        ReportProgress("Routing…");
+
         var allAgents = _registry.GetAll();
         var availableAgents = enabledAgentIds is null
             ? allAgents
@@ -67,6 +104,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
         using var routingActivity = _activitySource.StartRouting(availableAgents.Count);
 
         IReadOnlyList<AgentSelection> selections;
+        routingSw.Restart();
         try
         {
             selections = await _router.SelectAgentsAsync(
@@ -74,19 +112,28 @@ public sealed class SkOrchestrationService : IOrchestrationService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            routingSw.Stop();
             _log.LogError(ex, "[{CorrId}] Routing failed.", correlationId);
             yield return "An error occurred while routing your question to the right agents.";
-            LastMetadata = new OrchestrationMetadata(correlationId, [], totalSw.Elapsed, []);
+            LastMetadata = new OrchestrationMetadata(correlationId, [], totalSw.Elapsed, [],
+                RoutingElapsed: routingSw.Elapsed);
             yield break;
         }
+        routingSw.Stop();
 
         routingActivity?.SetTag("selected_agents", selections.Count);
+
+        // Apply confidence threshold — skip agents below the configured minimum.
+        selections = selections
+            .Where(s => s.Confidence >= _confidenceThreshold)
+            .ToList();
 
         if (selections.Count == 0)
         {
             _log.LogWarning("[{CorrId}] No agents selected. Returning fallback.", correlationId);
             yield return "I could not find any relevant documents or data sources to answer your question.";
-            LastMetadata = new OrchestrationMetadata(correlationId, [], totalSw.Elapsed, []);
+            LastMetadata = new OrchestrationMetadata(correlationId, [], totalSw.Elapsed, [],
+                RoutingElapsed: routingSw.Elapsed);
             yield break;
         }
 
@@ -100,6 +147,8 @@ public sealed class SkOrchestrationService : IOrchestrationService
             "[{CorrId}] Routing to {Count} agent(s): {Names}",
             correlationId, selectedAgents.Count,
             string.Join(", ", selectedAgents.Select(x => $"{x.Agent.Name}({x.Selection.Confidence:P0})")));
+
+        ReportProgress($"Running {selectedAgents.Count} agent{(selectedAgents.Count == 1 ? "" : "s")}…");
 
         // ── Step 2: Run agents in parallel with per-agent error isolation ────────
         //
@@ -146,7 +195,8 @@ public sealed class SkOrchestrationService : IOrchestrationService
         {
             yield return "All agent invocations failed. Please try again.";
             LastMetadata = new OrchestrationMetadata(
-                correlationId, selections, totalSw.Elapsed, agentRunResults);
+                correlationId, selections, totalSw.Elapsed, agentRunResults,
+                RoutingElapsed: routingSw.Elapsed);
             yield break;
         }
 
@@ -154,16 +204,20 @@ public sealed class SkOrchestrationService : IOrchestrationService
             "[{CorrId}] {Count} agent(s) responded. Proceeding to synthesis.",
             correlationId, successfulResponses.Count);
 
+        ReportProgress("Synthesizing…");
+
         // ── Step 3: Synthesize with streaming ────────────────────────────────────
         using var synthesisActivity = _activitySource.StartSynthesis(successfulResponses.Count);
 
         var fullResponse = new StringBuilder();
+        synthesisSw.Restart();
         await foreach (var token in _router.SynthesizeAsync(
                            userQuestion, successfulResponses, _conversationHistory, attachment, ct))
         {
             fullResponse.Append(token);
             yield return token;
         }
+        synthesisSw.Stop();
 
         synthesisActivity?.SetTag("response_length", fullResponse.Length);
 
@@ -175,7 +229,9 @@ public sealed class SkOrchestrationService : IOrchestrationService
 
         totalSw.Stop();
         LastMetadata = new OrchestrationMetadata(
-            correlationId, selections, totalSw.Elapsed, agentRunResults);
+            correlationId, selections, totalSw.Elapsed, agentRunResults,
+            RoutingElapsed:   routingSw.Elapsed,
+            SynthesisElapsed: synthesisSw.Elapsed);
 
         orchestrationActivity?.SetTag("total_elapsed_ms", totalSw.ElapsedMilliseconds);
 

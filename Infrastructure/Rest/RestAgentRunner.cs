@@ -101,8 +101,9 @@ public sealed class RestAgentRunner : IAgentRunner
             }
         }
 
-        // ── Step 2: Build the request URL ─────────────────────────────────────────
-        var url = BuildUrl(cfg, extractedParams);
+        // ── Step 2: Build the request URL and optional body ───────────────────────
+        var url  = BuildUrl(cfg, extractedParams);
+        var body = BuildRequestBody(cfg, extractedParams);
         _log.LogDebug("REST agent '{Name}' calling: {Method} {Url}", agent.Name, cfg.Method, url);
 
         // ── Step 3: Execute HTTP request ──────────────────────────────────────────
@@ -110,7 +111,7 @@ public sealed class RestAgentRunner : IAgentRunner
 
         try
         {
-            apiData = await FetchResponseAsync(cfg, url, ct);
+            apiData = await FetchResponseAsync(cfg, url, body, ct);
         }
         catch (Exception ex)
         {
@@ -213,9 +214,34 @@ public sealed class RestAgentRunner : IAgentRunner
         return string.IsNullOrEmpty(queryString) ? url : $"{url}?{queryString}";
     }
 
+    /// <summary>
+    /// Builds the JSON request body from <see cref="RestAgentConfig.BodyTemplate"/>,
+    /// replacing {ParamName} tokens with extracted values. Returns null when no template is set.
+    /// </summary>
+    private static string? BuildRequestBody(
+        RestAgentConfig             cfg,
+        Dictionary<string, string?> parameters)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.BodyTemplate))
+            return null;
+
+        var body = cfg.BodyTemplate;
+        foreach (var p in cfg.Parameters ?? [])
+        {
+            if (p.Location == "body")
+            {
+                var value = parameters.GetValueOrDefault(p.Name) ?? string.Empty;
+                body = body.Replace($"{{{p.Name}}}", value);
+            }
+        }
+
+        return body;
+    }
+
     private async Task<string> FetchResponseAsync(
         RestAgentConfig   cfg,
         string            url,
+        string?           requestBody,
         CancellationToken ct)
     {
         using var client  = _httpClientFactory.CreateClient();
@@ -226,6 +252,10 @@ public sealed class RestAgentRunner : IAgentRunner
         // Static headers (API keys, auth tokens, etc.)
         foreach (var (key, value) in cfg.StaticHeaders ?? new Dictionary<string, string>())
             request.Headers.TryAddWithoutValidation(key, value);
+
+        // Attach request body when provided (POST/PUT with BodyTemplate)
+        if (requestBody is not null)
+            request.Content = new StringContent(requestBody, Encoding.UTF8, "application/json");
 
         using var response = await client.SendAsync(request, ct);
 

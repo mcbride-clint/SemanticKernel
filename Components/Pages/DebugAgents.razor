@@ -50,8 +50,11 @@
 {
     <h3>Last Orchestration</h3>
     <pre class="ping-result">
-Correlation ID : @meta.CorrelationId
-Total elapsed  : @meta.TotalElapsed.TotalSeconds.ToString("F2")s
+Correlation ID   : @meta.CorrelationId
+Total elapsed    : @meta.TotalElapsed.TotalSeconds.ToString("F2")s
+  Routing        : @meta.RoutingElapsed.TotalMilliseconds.ToString("F0") ms
+  Agent execution: @((meta.TotalElapsed - meta.RoutingElapsed - meta.SynthesisElapsed).TotalMilliseconds.ToString("F0")) ms
+  Synthesis      : @meta.SynthesisElapsed.TotalMilliseconds.ToString("F0") ms
     </pre>
 
     <h3>Agent Routing — Selected Agents</h3>

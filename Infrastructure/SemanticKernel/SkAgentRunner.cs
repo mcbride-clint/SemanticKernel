@@ -48,6 +48,9 @@ public sealed class SkAgentRunner : IAgentRunner
             .Replace("{DESCRIPTION}", agent.Description)
             .Replace("{PDF_TEXT}",    agent.PdfText);
 
+        if (!string.IsNullOrWhiteSpace(agent.SystemPromptSuffix))
+            systemPrompt += "\n\n" + agent.SystemPromptSuffix;
+
         // Build user message — include attachment as additional context if provided
         var userMessage = BuildUserMessage(question, attachment);
 

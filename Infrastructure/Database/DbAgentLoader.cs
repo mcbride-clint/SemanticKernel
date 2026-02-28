@@ -44,6 +44,28 @@ public sealed class DbAgentLoader : IAgentSource
 
             foreach (var cfg in entries)
             {
+                // Validate required fields before registering the agent.
+                if (string.IsNullOrWhiteSpace(cfg.Id))
+                {
+                    _log.LogError("DB agent config is missing 'Id'. Skipping entry.");
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(cfg.ConnectionString))
+                {
+                    _log.LogError("DB agent '{Id}' has empty ConnectionString. Skipping.", cfg.Id);
+                    continue;
+                }
+                if (string.IsNullOrWhiteSpace(cfg.ContextQuery))
+                {
+                    _log.LogError("DB agent '{Id}' has empty ContextQuery. Skipping.", cfg.Id);
+                    continue;
+                }
+                if (cfg.Parameters is { } ps && ps.Any(p => string.IsNullOrWhiteSpace(p.Name)))
+                {
+                    _log.LogError("DB agent '{Id}' has a parameter with an empty Name. Skipping.", cfg.Id);
+                    continue;
+                }
+
                 _configs[cfg.Id] = cfg;
 
                 var agent = new AgentInfo(

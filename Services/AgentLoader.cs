@@ -58,12 +58,13 @@ public sealed class AgentLoader : IAgentSource
                 var id      = Path.GetFileName(dir).ToLowerInvariant().Replace(" ", "-");
 
                 var agent = new AgentInfo(
-                    Id:           id,
-                    Name:         meta.Name,
-                    Description:  meta.Description,
-                    PdfText:      pdfText,
-                    PdfCharCount: pdfText.Length,
-                    SourceType:   "pdf");
+                    Id:                 id,
+                    Name:               meta.Name,
+                    Description:        meta.Description,
+                    PdfText:            pdfText,
+                    PdfCharCount:       pdfText.Length,
+                    SourceType:         "pdf",
+                    SystemPromptSuffix: meta.SystemPromptSuffix);
 
                 results.Add(agent);
                 _log.LogInformation(
@@ -81,5 +82,9 @@ public sealed class AgentLoader : IAgentSource
         return results;
     }
 
-    private sealed record AgentJsonMeta(string Name, string Description);
+    private sealed record AgentJsonMeta(
+        string  Name,
+        string  Description,
+        string? SystemPromptSuffix = null
+    );
 }
