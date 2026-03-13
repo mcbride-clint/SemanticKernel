@@ -65,9 +65,9 @@ builder.Services.AddSingleton<IAgentRouter,   SkAgentRouter>();
 // Scoped so each Blazor circuit gets its own LastMetadata
 builder.Services.AddScoped<IOrchestrationService, SkOrchestrationService>();
 
-// ── Blazor ───────────────────────────────────────────────────────────────────
-builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents();
+// ── Razor Pages + MVC Controllers ────────────────────────────────────────────
+builder.Services.AddRazorPages();
+builder.Services.AddControllers();
 
 var app = builder.Build();
 
@@ -79,9 +79,9 @@ if (!app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseStaticFiles();
-app.UseAntiforgery();
+app.UseRouting();
 
-app.MapRazorComponents<BlazorAgentChat.Components.App>()
-    .AddInteractiveServerRenderMode();
+app.MapRazorPages();
+app.MapControllers();
 
 app.Run();

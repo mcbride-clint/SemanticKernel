@@ -1,0 +1,61 @@
+@page "/debug"
+@model DebugModel
+@{
+    ViewData["Title"] = "Debug";
+    ViewData["Page"] = "Debug";
+}
+
+<div class="debug-page">
+    <div class="debug-header">
+        <h1 class="debug-title">Agent Registry</h1>
+        <div class="debug-actions">
+            <button id="ping-btn" class="btn-primary" onclick="Debug.ping()">
+                <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/></svg>
+                Ping LLM
+            </button>
+            <span id="ping-result" class="ping-result"></span>
+        </div>
+    </div>
+
+    <div class="debug-stats">
+        <div class="stat-card">
+            <span class="stat-value">@Model.Agents.Count</span>
+            <span class="stat-label">Total Agents</span>
+        </div>
+        @foreach (var group in Model.Agents.GroupBy(a => a.SourceType).OrderBy(g => g.Key))
+        {
+            <div class="stat-card">
+                <span class="stat-value">@group.Count()</span>
+                <span class="stat-label agent-type-@group.Key">@group.Key</span>
+            </div>
+        }
+    </div>
+
+    <div class="debug-table-wrapper">
+        <table class="debug-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                    <th>Chars</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var agent in Model.Agents.OrderBy(a => a.SourceType).ThenBy(a => a.Name))
+                {
+                    <tr>
+                        <td class="mono">@agent.Id</td>
+                        <td class="agent-name-cell">@agent.Name</td>
+                        <td><span class="agent-type-badge agent-type-@agent.SourceType">@agent.SourceType</span></td>
+                        <td class="agent-desc-cell">@agent.Description</td>
+                        <td class="mono text-right">@(agent.PdfCharCount > 0 ? agent.PdfCharCount.ToString("N0") : "—")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script src="~/js/debug.js" asp-append-version="true"></script>
