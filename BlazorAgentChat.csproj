@@ -11,8 +11,6 @@
     <PackageReference Include="Markdig" Version="0.*" />
     <PackageReference Include="Microsoft.SemanticKernel" Version="1.*" />
     <PackageReference Include="Microsoft.SemanticKernel.Agents.Core" Version="1.*" />
-    <PackageReference Include="Microsoft.SemanticKernel.Agents.Orchestration" Version="1.*" />
-    <PackageReference Include="Microsoft.SemanticKernel.Agents.Runtime.InProcess" Version="1.*" />
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.OpenAI" Version="1.*" />
     <PackageReference Include="PdfPig" Version="0.*" />
   </ItemGroup>

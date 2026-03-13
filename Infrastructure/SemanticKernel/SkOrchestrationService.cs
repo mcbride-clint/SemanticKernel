@@ -104,6 +104,7 @@ public sealed class SkOrchestrationService : IOrchestrationService
         using var routingActivity = _activitySource.StartRouting(availableAgents.Count);
 
         IReadOnlyList<AgentSelection> selections;
+        bool routingFailed = false;
         routingSw.Restart();
         try
         {
@@ -114,12 +115,19 @@ public sealed class SkOrchestrationService : IOrchestrationService
         {
             routingSw.Stop();
             _log.LogError(ex, "[{CorrId}] Routing failed.", correlationId);
-            yield return "An error occurred while routing your question to the right agents.";
+            routingFailed = true;
+            selections = [];
+        }
+        if (!routingFailed)
+            routingSw.Stop();
+
+        if (routingFailed)
+        {
             LastMetadata = new OrchestrationMetadata(correlationId, [], totalSw.Elapsed, [],
                 RoutingElapsed: routingSw.Elapsed);
+            yield return "An error occurred while routing your question to the right agents.";
             yield break;
         }
-        routingSw.Stop();
 
         routingActivity?.SetTag("selected_agents", selections.Count);
 

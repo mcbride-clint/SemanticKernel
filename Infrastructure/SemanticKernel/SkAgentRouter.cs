@@ -171,7 +171,7 @@ public sealed class SkAgentRouter : IAgentRouter
         await foreach (var chunk in chatAgent.InvokeStreamingAsync(
                            messages, thread: null, options: null, ct))
         {
-            var text = chunk.Content;
+            var text = chunk.Message.Content;
             if (!string.IsNullOrEmpty(text))
             {
                 chunkCount++;
@@ -186,7 +186,7 @@ public sealed class SkAgentRouter : IAgentRouter
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private static IReadOnlyList<ChatMessageContent> BuildMessages(
+    private static List<ChatMessageContent> BuildMessages(
         string                           userQuestion,
         IReadOnlyList<AgentResponse>     agentResponses,
         IReadOnlyList<ConversationTurn>? history,
